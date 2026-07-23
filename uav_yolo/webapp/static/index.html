@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UAV_yolo 地面站</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">🛩️</span>
+    <div>
+      <h1>UAV_yolo 地面站</h1>
+      <div class="sub">視覺目標追蹤 × PX4 導引</div>
+    </div>
+  </div>
+  <div class="header-badges">
+    <span id="badge-mode" class="badge">—</span>
+    <span id="badge-state" class="badge">連線中…</span>
+  </div>
+  <nav>
+    <button class="tab active" data-view="dashboard">儀表板</button>
+    <button class="tab" data-view="checklist">任務檢查</button>
+    <button class="tab" data-view="settings">系統設定</button>
+    <button class="tab" data-view="calib">相機校正</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ================= 儀表板 ================= -->
+<section id="view-dashboard" class="view active">
+  <div class="dash-grid">
+    <div class="video-panel card">
+      <div class="video-head">
+        <span id="video-label">影像</span>
+        <span id="video-fps" class="mut"></span>
+      </div>
+      <img id="stream" src="/stream.mjpg" alt="即時影像">
+      <div id="video-error" class="warn-line" hidden></div>
+    </div>
+
+    <div class="side-col">
+      <div class="card guidance-card">
+        <h2>導引控制</h2>
+        <button id="btn-guidance" class="big-btn off">導引：關閉</button>
+        <div id="gate-list" class="gate-list"></div>
+        <div id="last-cmd" class="mut small"></div>
+      </div>
+
+      <div class="card">
+        <h2>目標</h2>
+        <div id="target-info" class="kv"></div>
+        <div class="det-head">
+          <span>偵測列表（點選鎖定）</span>
+          <button id="btn-unlock" class="mini-btn">解除鎖定</button>
+        </div>
+        <div id="det-list" class="det-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>載具</h2>
+        <div id="vehicle-info" class="kv"></div>
+      </div>
+
+      <div class="card">
+        <h2>俯視圖 <span class="mut small">(N↑ E→，公尺)</span></h2>
+        <canvas id="map" width="360" height="300"></canvas>
+        <div class="map-legend">
+          <span><i class="dot dot-veh"></i>載具</span>
+          <span><i class="dot dot-tgt"></i>目標</span>
+          <span><i class="dot dot-cmd"></i>指令點</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 任務檢查清單 ================= -->
+<section id="view-checklist" class="view">
+  <div class="card narrow">
+    <div class="cl-head">
+      <h2>任務前檢查清單</h2>
+      <div class="cl-progress">
+        <div class="bar"><div id="cl-bar" class="bar-fill"></div></div>
+        <span id="cl-count" class="mut"></span>
+      </div>
+    </div>
+    <div id="cl-groups"></div>
+    <div class="cl-actions">
+      <button id="cl-uncheck" class="mini-btn">全部取消勾選（新任務）</button>
+      <button id="cl-reset" class="mini-btn danger">還原預設清單</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 系統設定 ================= -->
+<section id="view-settings" class="view">
+  <div class="card narrow">
+    <h2>系統設定</h2>
+    <div class="mut small" style="margin-bottom:12px">
+      改完按「儲存」寫入 config/local.yaml；標 ⟳ 的項目要再按「重啟引擎」才生效。
+    </div>
+    <div id="settings-form"></div>
+    <div class="settings-actions">
+      <button id="cfg-save" class="big-btn save">儲存設定</button>
+      <button id="cfg-restart" class="big-btn restart">⟳ 重啟引擎</button>
+    </div>
+    <div id="cfg-msg" class="mut small"></div>
+    <div id="cfg-meta" class="meta-box"></div>
+  </div>
+</section>
+
+<!-- ================= 相機校正 ================= -->
+<section id="view-calib" class="view">
+  <div class="calib-grid">
+    <div class="card">
+      <h2>即時畫面</h2>
+      <img id="calib-stream" src="/stream.mjpg" alt="校正畫面">
+    </div>
+    <div class="card">
+      <h2>棋盤格校正</h2>
+      <ol class="calib-steps mut">
+        <li>印一張棋盤格（預設 10×7 格＝內角點 9×6），貼平板上</li>
+        <li>按「開始」，把板子舉到鏡頭前不同角度/距離/位置</li>
+        <li>每換一個姿勢按一次「擷取」，收 15～25 張（角落也要涵蓋）</li>
+        <li>「計算」看 RMS（&lt;1px 佳）→「儲存」→ 到設定頁重啟引擎</li>
+      </ol>
+      <div class="calib-form">
+        <label>內角點 列 <input id="cb-cols" type="number" value="9" min="4"></label>
+        <label>內角點 行 <input id="cb-rows" type="number" value="6" min="4"></label>
+        <label>方格邊長 mm <input id="cb-square" type="number" value="25" min="5"></label>
+      </div>
+      <div class="calib-actions">
+        <button id="calib-start" class="mini-btn">開始 / 重來</button>
+        <button id="calib-capture" class="big-btn save" disabled>擷取本幀</button>
+        <button id="calib-compute" class="mini-btn" disabled>計算</button>
+        <button id="calib-save" class="mini-btn" disabled>儲存校正檔</button>
+      </div>
+      <div id="calib-status" class="kv"></div>
+      <div id="calib-result" class="meta-box" hidden></div>
+    </div>
+  </div>
+</section>
+
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

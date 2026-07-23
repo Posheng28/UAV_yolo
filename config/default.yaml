@@ -1,0 +1,93 @@
+# =============================================================
+# UAV_yolo 預設設定（請勿直接改這份）
+# 使用者修改一律存到 config/local.yaml（UI 設定頁會自動寫入），
+# 讀取時 local.yaml 會覆蓋 default.yaml 的同名欄位。
+# =============================================================
+
+system:
+  mode: live            # live=實機 | sim=模擬（無硬體全鏈路驗證）
+  web_host: 127.0.0.1
+  web_port: 8600
+
+vehicle:
+  airframe: multirotor  # multirotor=旋翼機 | fixedwing=固定翼
+  firmware: px4         # 目前僅支援 px4（兩台載具都是）
+
+video:
+  source: uvc           # uvc=HDMI採集卡/USB相機直開 | obs=OBS虛擬相機 | rtsp=IP串流 | file=影片檔
+  uvc_name_hint: ""     # 用裝置名稱鎖定（例 "USB Video"），空字串則用 uvc_index
+  uvc_index: 1
+  obs_name_hint: "OBS Virtual Camera"
+  rtsp_url: "rtsp://192.168.144.25:8554/main"
+  file_path: ""
+  width: 1280
+  height: 720
+
+camera:
+  # 校正結果檔（UI 校正頁產生）。檔案不存在時退回用 fallback_hfov_deg 近似
+  intrinsics_file: config/camera_intrinsics.yaml
+  fallback_hfov_deg: 120.0
+
+gimbal:
+  present: true         # 有沒有裝雲台（C-20T 三軸）
+  control: roi          # roi=發ROI座標由飛控指向(建議) | pitchyaw=直接下角度 | none=固定安裝不控
+  stabilized: true      # 三軸自穩雲台：相機姿態≈指令角（地理座標系），測地不用機體 roll/pitch
+  attitude_source: auto # auto=優先雲台回報→其次指令角→最後固定安裝 | feedback | commanded | mount
+  # 無雲台（control: none）時相機相對機體的安裝角，度。pitch -90 = 垂直朝下
+  mount_deg: { roll: 0.0, pitch: -90.0, yaw: 0.0 }
+  roi_update_min_m: 2.0   # 目標估計位置移動超過此距離才重發 ROI（省數傳頻寬）
+
+detector:
+  weights: weights/best.pt   # 不存在時自動退 yolo26n.pt（COCO 預訓練）
+  class_names: [Car, Truck]  # 允許鎖定的類別（依權重的類別名）
+  conf: 0.55
+  imgsz: 640
+  lock_mode: auto       # auto=最大目標連續N幀自動鎖定 | manual=UI點選才鎖定
+  min_lock_frames: 6    # 連續看到幾幀才允許鎖定（承襲原系統規格）
+
+estimator:
+  accel_std: 3.0        # 目標機動強度 m/s^2（過程噪聲）
+  meas_std: 8.0         # 測地量測噪聲 m
+  gate_sigma: 4.0       # innovation 閘門（幾個標準差外的量測丟棄，取代舊的25m跳變門檻）
+  coast_timeout_s: 8.0  # 丟失後用速度外推(coast)的最長時間，超過進 LOST
+
+guidance:
+  enabled: false        # 安全預設：不發導引指令。要追蹤時在 UI 儀表板明確打開
+  rate_hz: 1.0          # 指令頻率上限（承襲原系統「別每幀都發」規格）
+  multirotor:
+    follow_alt_m: 40.0    # 跟隨高度（相對 home）
+    standoff_m: 15.0      # 水平退距（0=正上方）
+    reposition_deadband_m: 3.0   # 目標點移動超過此距離才重發
+  fixedwing:
+    orbit_radius_m: 150.0 # standoff 繞行半徑（須大於最小轉彎半徑）
+    orbit_dir: cw         # cw | ccw
+    lead_time_s: 3.0      # 圓心用 KF 預測位置往前推的秒數
+    alt_m: 80.0           # 繞行高度（相對 home）
+    reposition_deadband_m: 10.0
+
+safety:
+  link_timeout_s: 2.0        # 數傳超時停止發送（承襲原系統）
+  allowed_modes: ["AUTO.LOITER"]  # 只有載具在這些 PX4 模式才發導引指令；
+                                  # 飛行員撥桿切出去=接管，立即閂鎖停發，需在 UI 重新啟用
+  max_cmd_distance_m: 500.0  # 指令點離 home 的最大距離（圍欄）
+  min_cmd_alt_m: 20.0        # 指令高度下限（相對 home）
+  max_cmd_alt_m: 120.0       # 指令高度上限（相對 home）
+  max_meas_jump_m: 30.0      # 單幀測地跳變硬上限（KF gate 之外的最後防線）
+
+mavlink:
+  port: COM3            # 數傳電台 COM 埠
+  baud: 57600
+  gcs_system_id: 255
+  # 跟飛控要的訊息頻率（Hz）；低頻寬數傳夠用的保守值
+  stream_rates:
+    ATTITUDE: 10
+    GLOBAL_POSITION_INT: 5
+    GIMBAL_DEVICE_ATTITUDE_STATUS: 5
+
+sim:
+  # 模擬模式參數（system.mode: sim 時生效）
+  home: { lat: 24.569890, lon: 120.841928 }
+  target_speed_ms: 10.0     # 模擬地面車速
+  stop_after_s: 25.0        # 幾秒後模擬「急停」
+  detection_dropout: [[12.0, 15.0]]  # 模擬盲區（幾秒~幾秒偵測不到）
+  pixel_noise_px: 2.0

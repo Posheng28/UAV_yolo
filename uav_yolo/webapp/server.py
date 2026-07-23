@@ -1,0 +1,255 @@
+"""地面站 Web UI 伺服器（FastAPI）。
+
+    GET  /                    儀表板（單頁應用）
+    GET  /stream.mjpg         即時影像（MJPEG，含偵測疊加）
+    GET  /api/status          引擎狀態（前端 400ms 輪詢）
+    POST /api/guidance        {"enabled": bool} 導引總開關
+    POST /api/lock            {"track_id": int} 手動鎖定
+    POST /api/unlock          解鎖
+    GET/PUT /api/config       讀/寫設定（寫入 config/local.yaml）
+    POST /api/restart         用最新設定重建引擎
+    GET  /api/devices         影像裝置清單
+    檢查清單與相機校正端點見下。
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import threading
+import time
+from pathlib import Path
+
+import cv2
+from fastapi import Body, FastAPI
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from ..config import PROJECT_ROOT, Config
+from ..engine import create_engine
+from ..vision.calibration import CalibrationSession
+from ..vision.source import list_video_devices
+from .checklist import Checklist
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+class EngineManager:
+    """持有目前引擎；設定變更後可整組重建。"""
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self.engine = None
+
+    def start(self) -> None:
+        with self._lock:
+            self.engine = create_engine(self.cfg)
+            self.engine.start()
+
+    def restart(self) -> None:
+        with self._lock:
+            if self.engine is not None:
+                self.engine.stop()
+            self.cfg.reload()
+            self.engine = create_engine(self.cfg)
+            self.engine.start()
+
+
+def create_app(cfg: Config | None = None) -> FastAPI:
+    cfg = cfg or Config()
+    manager = EngineManager(cfg)
+    checklist = Checklist()
+    calib: dict = {"session": None}
+
+    app = FastAPI(title="UAV_yolo 地面站")
+    app.state.manager = manager
+
+    @app.on_event("startup")
+    def _startup():
+        manager.start()
+
+    @app.on_event("shutdown")
+    def _shutdown():
+        if manager.engine:
+            manager.engine.stop()
+
+    # ---------------- 頁面與影像 ----------------
+
+    @app.get("/")
+    def index():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/stream.mjpg")
+    def stream():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+
+        def gen():
+            while True:
+                engine = manager.engine
+                jpeg = engine.jpeg_frame() if engine else None
+                if jpeg is not None:
+                    yield boundary + jpeg + b"\r\n"
+                time.sleep(0.07)  # ~14 fps 串流即可
+
+        return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    # ---------------- 狀態與操作 ----------------
+
+    @app.get("/api/status")
+    def status():
+        engine = manager.engine
+        if engine is None:
+            return {"ready": False}
+        data = dataclasses.asdict(engine.status())
+        data["ready"] = True
+        return data
+
+    @app.post("/api/guidance")
+    def set_guidance(body: dict = Body(...)):
+        if manager.engine:
+            manager.engine.set_guidance_enabled(bool(body.get("enabled")))
+        return {"ok": True}
+
+    @app.post("/api/lock")
+    def lock(body: dict = Body(...)):
+        if manager.engine and "track_id" in body:
+            manager.engine.manual_lock(int(body["track_id"]))
+        return {"ok": True}
+
+    @app.post("/api/unlock")
+    def unlock():
+        if manager.engine:
+            manager.engine.unlock()
+        return {"ok": True}
+
+    # ---------------- 設定 ----------------
+
+    @app.get("/api/config")
+    def get_config():
+        weights = cfg.get("detector.weights", "")
+        weights_exists = (PROJECT_ROOT / weights).exists() if weights else False
+        intrinsics = PROJECT_ROOT / cfg.get("camera.intrinsics_file", "")
+        return {
+            "config": cfg.as_dict(),
+            "meta": {
+                "weights_exists": weights_exists,
+                "calibrated": intrinsics.exists(),
+                "devices": list_video_devices(),
+            },
+        }
+
+    @app.put("/api/config")
+    def put_config(body: dict = Body(...)):
+        cfg.update(body)
+        return {"ok": True, "note": "已存檔；影像來源/載體/MAVLink 等變更需按「重啟引擎」生效"}
+
+    @app.post("/api/restart")
+    def restart():
+        manager.restart()
+        return {"ok": True}
+
+    @app.get("/api/devices")
+    def devices():
+        return {"devices": list_video_devices()}
+
+    # ---------------- 檢查清單 ----------------
+
+    @app.get("/api/checklist")
+    def get_checklist():
+        items = checklist.all()
+        done = sum(1 for i in items if i["done"])
+        return {"items": items, "done": done, "total": len(items)}
+
+    @app.post("/api/checklist/toggle")
+    def checklist_toggle(body: dict = Body(...)):
+        checklist.toggle(str(body.get("id")))
+        return {"ok": True}
+
+    @app.post("/api/checklist/add")
+    def checklist_add(body: dict = Body(...)):
+        item = checklist.add(str(body.get("group", "自訂")), str(body.get("text", "")).strip())
+        return {"ok": True, "item": item}
+
+    @app.post("/api/checklist/remove")
+    def checklist_remove(body: dict = Body(...)):
+        checklist.remove(str(body.get("id")))
+        return {"ok": True}
+
+    @app.post("/api/checklist/uncheck_all")
+    def checklist_uncheck():
+        checklist.uncheck_all()
+        return {"ok": True}
+
+    @app.post("/api/checklist/reset")
+    def checklist_reset():
+        checklist.reset()
+        return {"ok": True}
+
+    # ---------------- 相機校正 ----------------
+
+    @app.post("/api/calib/start")
+    def calib_start(body: dict = Body(...)):
+        calib["session"] = CalibrationSession(
+            board_cols=int(body.get("cols", 9)),
+            board_rows=int(body.get("rows", 6)),
+            square_mm=float(body.get("square_mm", 25.0)),
+        )
+        return {"ok": True}
+
+    @app.post("/api/calib/capture")
+    def calib_capture():
+        sess: CalibrationSession | None = calib["session"]
+        engine = manager.engine
+        if sess is None or engine is None:
+            return JSONResponse({"ok": False, "error": "校正未開始或引擎未就緒"}, status_code=400)
+        frame = engine.raw_frame()
+        if frame is None:
+            return JSONResponse({"ok": False, "error": "目前沒有影像"}, status_code=400)
+        found = sess.capture(frame)
+        return {"ok": True, "found": found, "count": sess.count}
+
+    @app.post("/api/calib/compute")
+    def calib_compute():
+        sess: CalibrationSession | None = calib["session"]
+        if sess is None:
+            return JSONResponse({"ok": False, "error": "校正未開始"}, status_code=400)
+        try:
+            result = sess.compute()
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        model = result["camera_model"]
+        return {
+            "ok": True,
+            "rms": round(result["rms"], 3),
+            "hfov_deg": round(result["hfov_deg"], 1),
+            "fx": round(float(model.K[0, 0]), 1),
+            "fy": round(float(model.K[1, 1]), 1),
+            "cx": round(float(model.K[0, 2]), 1),
+            "cy": round(float(model.K[1, 2]), 1),
+            "dist": [round(float(d), 4) for d in model.dist],
+        }
+
+    @app.post("/api/calib/save")
+    def calib_save():
+        sess: CalibrationSession | None = calib["session"]
+        if sess is None or sess.result is None:
+            return JSONResponse({"ok": False, "error": "尚未計算校正結果"}, status_code=400)
+        path = PROJECT_ROOT / cfg.get("camera.intrinsics_file")
+        sess.save(str(path))
+        return {"ok": True, "path": str(path), "note": "重啟引擎後生效"}
+
+    @app.get("/api/calib/status")
+    def calib_status():
+        sess: CalibrationSession | None = calib["session"]
+        if sess is None:
+            return {"active": False}
+        return {
+            "active": True,
+            "count": sess.count,
+            "board": list(sess.board_size),
+            "last_found": sess.last_found,
+            "has_result": sess.result is not None,
+        }
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    return app

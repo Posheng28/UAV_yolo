@@ -75,7 +75,7 @@ safety:
   max_meas_jump_m: 30.0      # 單幀測地跳變硬上限（KF gate 之外的最後防線）
 
 mavlink:
-  port: COM3            # 數傳電台 COM 埠
+  port: COM3            # 遙測（姿態/位置/雲台）來源數傳電台 COM 埠
   baud: 57600
   gcs_system_id: 255
   # 跟飛控要的訊息頻率（Hz）；低頻寬數傳夠用的保守值
@@ -83,6 +83,19 @@ mavlink:
     ATTITUDE: 10
     GLOBAL_POSITION_INT: 5
     GIMBAL_DEVICE_ATTITUDE_STATUS: 5
+
+link:
+  # 指令後端：決定「算出的目標 GPS」用什麼方式送出去
+  #  direct = UAV_yolo 直接對 PX4 發 MAVLink DO_REPOSITION（上面 mavlink.port 同一條電台
+  #           既讀遙測又發指令）。四軸首次驗證、無機上 companion 時最簡單。
+  #  lr24   = 整合 NYCU_UAV_offboard：目標經 LR24-F 送 $CMD,seq,GOTO 給機上 companion 的
+  #           global_goto_node，由它套安全 gate 再 DO_REPOSITION。此時 mavlink.port 這條
+  #           MAVLink(SiK) 電台只負責「讀 pose」（LR24 不回傳姿態/位置），雲台 ROI 也走它。
+  command_backend: direct
+  lr24_port: COM4              # lr24 模式：地面端 LR24-F 的 COM 埠（與 mavlink.port 不同條）
+  lr24_baud: 115200
+  goto_altitude_ref: rel_home  # rel_home=送 GOTO（相對 home，須落在節點 30~120m）| amsl=送 GOTO_AMSL
+  lr24_response_timeout_s: 8.0 # 等 ACK/ERR 逾時（對齊 node 7s service timeout）
 
 sim:
   # 模擬模式參數（system.mode: sim 時生效）

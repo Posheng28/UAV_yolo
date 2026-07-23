@@ -312,9 +312,13 @@ class MavlinkConnection:
 
     def send_reposition(
         self, lat: float, lon: float, alt_amsl: float,
+        alt_rel_m: float | None = None,
         loiter_radius_m: float | None = None, loiter_ccw: bool = False,
     ) -> None:
-        """DO_REPOSITION：旋翼=飛到點懸停；固定翼=以 NAV_LOITER_RAD（或 param3）繞行。"""
+        """DO_REPOSITION：旋翼=飛到點懸停；固定翼=以 NAV_LOITER_RAD（或 param3）繞行。
+
+        alt_rel_m 僅供 LR24 後端用相對 home 高度；MAVLink 直連用 alt_amsl，故忽略。
+        """
         MAV_FRAME_GLOBAL_INT = 5
         MAV_CMD_DO_REPOSITION = 192
         MAV_DO_REPOSITION_FLAGS_CHANGE_MODE = 1

@@ -124,7 +124,13 @@ function renderStatus(st) {
     kvRow("高度(相對)", v.rel_alt !== null && v.rel_alt !== undefined ? fmt(v.rel_alt, 0) + " m" : "—") +
     kvRow("Home", v.home_set ? "已取得" : "未取得", v.home_set ? "good" : "bad") +
     kvRow("雲台", st.gimbal.present ? `${st.gimbal.control}${st.gimbal.has_feedback ? "・有回報" : ""}` : "無") +
-    kvRow("處理速率", fmt(st.loop_hz, 0) + " Hz");
+    kvRow("處理速率", fmt(st.loop_hz, 0) + " Hz") +
+    (st.mavlink && st.mavlink.backend === "lr24" && st.mavlink.lr24
+      ? kvRow("LR24 指令",
+          `送${st.mavlink.lr24.sent} ACK${st.mavlink.lr24.ack} ERR${st.mavlink.lr24.err}` +
+          (st.mavlink.lr24.ready_for_goto === true ? "・可 GOTO" : st.mavlink.lr24.ready_for_goto === false ? "・未就緒" : ""),
+          st.mavlink.lr24.connected ? "good" : "bad")
+      : "");
 
   // 影像資訊
   $("#video-label").textContent = st.video.device || "影像";
@@ -308,9 +314,17 @@ const FIELDS = [
   { path: "safety.max_cmd_distance_m", label: "距 Home 圍欄 m", type: "number" },
   { path: "safety.min_cmd_alt_m", label: "指令高度下限 m", type: "number" },
   { path: "safety.max_cmd_alt_m", label: "指令高度上限 m", type: "number" },
-  { sec: "MAVLink 數傳" },
-  { path: "mavlink.port", label: "COM 埠", type: "text", hint: "例 COM3 ⟳" },
+  { sec: "MAVLink 數傳（讀 pose）" },
+  { path: "mavlink.port", label: "COM 埠", type: "text", hint: "姿態/位置/雲台來源；例 COM3 ⟳" },
   { path: "mavlink.baud", label: "鮑率", type: "number", hint: "SiK 電台常見 57600 ⟳" },
+  { sec: "指令後端（整合 NYCU offboard）" },
+  { path: "link.command_backend", label: "目標送出方式", type: "select",
+    options: [["direct", "直接 MAVLink DO_REPOSITION（四軸首驗）"], ["lr24", "LR24 → 機上 global_goto_node（整合）"]],
+    hint: "direct=上面那條數傳直接發給 PX4；lr24=經 LR24-F 交給機上 companion 套安全 gate ⟳" },
+  { path: "link.lr24_port", label: "LR24 COM 埠", type: "text", hint: "lr24 模式用；與上面遙測數傳不同一條 ⟳" },
+  { path: "link.lr24_baud", label: "LR24 鮑率", type: "number", hint: "LR24-F 序列埠常見 115200 ⟳" },
+  { path: "link.goto_altitude_ref", label: "GOTO 高度基準", type: "select",
+    options: [["rel_home", "相對 Home（節點限 30~120m）"], ["amsl", "AMSL 海拔"]], hint: "lr24 模式送 GOTO / GOTO_AMSL ⟳" },
 ];
 
 function getPath(obj, path) {

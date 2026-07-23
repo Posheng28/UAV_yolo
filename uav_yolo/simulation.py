@@ -212,10 +212,10 @@ class SimLink:
 
     # ---- 指令介面（與 MavlinkConnection 同簽名） ----
 
-    def send_reposition(self, lat, lon, alt_amsl, loiter_radius_m=None, loiter_ccw=False) -> None:
+    def send_reposition(self, lat, lon, alt_amsl, alt_rel_m=None, loiter_radius_m=None, loiter_ccw=False) -> None:
         ned = self.world.georef.lla_to_ned(lat, lon, 0.0)
         self.world.cmd_point = np.array([ned[0], ned[1]])
-        self.world.cmd_alt_rel = alt_amsl - self.world.home_alt_amsl
+        self.world.cmd_alt_rel = alt_rel_m if alt_rel_m is not None else alt_amsl - self.world.home_alt_amsl
         self.world.cmd_radius = loiter_radius_m
         self.world.cmd_ccw = loiter_ccw
         self.world.repositions.append(

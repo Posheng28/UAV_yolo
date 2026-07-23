@@ -360,6 +360,7 @@ class TrackerEngine:
         alt_amsl = (self.home_alt_amsl or 0.0) + cmd.alt_rel_m
         self.link.send_reposition(
             lat, lon, alt_amsl,
+            alt_rel_m=cmd.alt_rel_m,   # LR24 GOTO 用相對 home 高度；MAVLink 直連忽略
             loiter_radius_m=cmd.loiter_radius_m,
             loiter_ccw=cmd.loiter_ccw,
         )
@@ -520,7 +521,11 @@ class TrackerEngine:
                 "source": self.camera_model.source,
                 "hfov_deg": round(self.camera_model.hfov_deg, 1),
             },
-            mavlink={"error": getattr(self.link, "error", None)},
+            mavlink={
+                "error": getattr(self.link, "error", None),
+                "backend": "lr24" if hasattr(self.link, "command") else "direct",
+                "lr24": self.link.command.snapshot() if hasattr(self.link, "command") else None,
+            },
             gimbal={
                 "present": self.gimbal_present,
                 "control": self.gimbal_control,
@@ -558,9 +563,26 @@ def create_engine(cfg: Config) -> TrackerEngine:
         class_names=det_cfg.get("class_names", []),
     )
     video = VideoSource(cfg.section("video"))
-    link = MavlinkConnection(
+    telemetry = MavlinkConnection(
         port=cfg.get("mavlink.port", "COM3"),
         baud=int(cfg.get("mavlink.baud", 57600)),
         stream_rates=cfg.get("mavlink.stream_rates", {}),
     )
+
+    backend = cfg.get("link.command_backend", "direct")
+    if backend == "lr24":
+        # 整合 NYCU：pose 走 MAVLink(SiK)、目標 GOTO 走 LR24 給 companion 的 global_goto_node
+        from .links import CompositeLink, Lr24CommandChannel
+
+        alt_ref = cfg.get("link.goto_altitude_ref", "rel_home")
+        channel = Lr24CommandChannel(
+            port=cfg.get("link.lr24_port", "COM4"),
+            baud=int(cfg.get("link.lr24_baud", 115200)),
+            alt_ref=alt_ref,
+            response_timeout_s=float(cfg.get("link.lr24_response_timeout_s", 8.0)),
+        )
+        link = CompositeLink(telemetry, channel, goto_alt_ref=alt_ref)
+    else:
+        link = telemetry  # direct：同一條 MAVLink 既讀遙測又發 DO_REPOSITION
+
     return TrackerEngine(cfg, video=video, detector=detector, link=link)

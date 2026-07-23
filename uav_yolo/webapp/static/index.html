@@ -18,6 +18,7 @@
   <div class="header-badges">
     <span id="badge-mode" class="badge">—</span>
     <span id="badge-state" class="badge">連線中…</span>
+    <button id="btn-help" class="help-btn" title="使用說明">❓ 使用說明</button>
   </div>
   <nav>
     <button class="tab active" data-view="dashboard">儀表板</button>
@@ -145,6 +146,85 @@
 </section>
 
 </main>
+
+<!-- ================= 使用說明彈窗 ================= -->
+<div id="help-overlay" class="modal-overlay" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>📖 使用說明</h2>
+      <button id="help-close" class="modal-close" title="關閉（Esc）">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <section>
+        <h3>這套系統在做什麼</h3>
+        <p>YOLO 從空拍畫面偵測地面車輛 → 用相機參數＋雲台/機體姿態把像素換算成
+        <b>GPS 座標</b> → Kalman 濾波估計目標位置與速度 → 對 PX4 發導引指令：
+        <b>旋翼＝跟隨懸停</b>、<b>固定翼＝繞著目標轉圈（standoff）</b>，
+        同時命令雲台持續指向目標。</p>
+      </section>
+
+      <section>
+        <h3>🎮 第一次使用：先玩模擬模式</h3>
+        <ol>
+          <li>啟動時加參數：<code>python run.py --sim</code>（或設定頁把「模式」切成模擬）</li>
+          <li>儀表板會出現合成畫面與一台紅色小車，系統自動鎖定（框變綠、出現 🔒）</li>
+          <li>按「<b>導引：關閉（點擊啟用）</b>」大按鈕 → 看俯視圖：載具開始追上目標</li>
+          <li>模擬的車在 25 秒時會<b>急停</b>——觀察系統怎麼收斂（這就是實戰要的行為）</li>
+          <li>到設定頁把載體切成「固定翼」→ 按「⟳ 重啟引擎」→ 看繞行行為的差異</li>
+        </ol>
+      </section>
+
+      <section>
+        <h3>🛫 實機任務流程</h3>
+        <ol>
+          <li><b>飛行前</b>：把「任務檢查」分頁的清單全部過一遍（按「全部取消勾選」開始新任務）</li>
+          <li><b>起飛</b>後由飛行員切到 <b>Hold（AUTO.LOITER）</b>模式</li>
+          <li>儀表板確認三綠：數傳正常、Home 已取得、模式 AUTO.LOITER</li>
+          <li><b>鎖定目標</b>：等自動鎖定，或直接點「偵測列表」裡要跟的那台車</li>
+          <li>確認目標卡的速度合理、不確定度小 → 按「<b>導引：啟用</b>」</li>
+          <li>系統以每秒最多 1 次發送位置指令；「未發送原因」清單隨時告訴你哪個安全閘門擋住了</li>
+        </ol>
+        <div class="help-warn">🕹️ <b>飛行員永遠有最終控制權</b>：任何時刻撥模式開關離開
+        Hold，系統立即停止發送並「閂鎖」——就算切回 Hold 也不會自己恢復，
+        必須回 UI 重新按啟用。這是刻意設計，防止系統在你不知情時搶回控制。</div>
+      </section>
+
+      <section>
+        <h3>🚦 狀態燈號</h3>
+        <table class="help-table">
+          <tr><td><span class="badge st-SEARCH">搜尋中</span></td><td>還沒鎖定目標（等自動鎖定或手動點選）</td></tr>
+          <tr><td><span class="badge st-TRACK">追蹤中</span></td><td>鎖定且持續有量測，一切正常</td></tr>
+          <tr><td><span class="badge st-COAST">盲區外推</span></td><td>暫時看不到目標（繞行死角/遮蔽），用速度預測撐著，正常現象</td></tr>
+          <tr><td><span class="badge st-LOST">目標丟失</span></td><td>外推超時（預設 8 秒）已放棄，需重新鎖定</td></tr>
+        </table>
+      </section>
+
+      <section>
+        <h3>📑 四個分頁</h3>
+        <ul>
+          <li><b>儀表板</b>：即時影像（點偵測框可換鎖定對象）、導引開關、載具/目標狀態、俯視軌跡圖（定翼會畫繞行圓）</li>
+          <li><b>任務檢查</b>：任務前 to-do 清單，可自訂項目（每組最下方輸入框按 Enter 新增）</li>
+          <li><b>系統設定</b>：載體種類、雲台、影像來源、導引與安全參數；標 ⟳ 的改完要按「重啟引擎」</li>
+          <li><b>相機校正</b>：拿棋盤格對鏡頭拍 15~25 張 → 計算 → 儲存；<b>校正過測地才準</b>，換鏡頭/變焦後要重做</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3>🔧 常見問題</h3>
+        <ul>
+          <li><b>沒有畫面</b>：設定頁確認來源選對、OBS 等程式沒佔用採集卡；看裝置清單有沒有列出你的採集卡</li>
+          <li><b>載具卡全是「—」</b>：數傳沒通。確認 COM 埠、鮑率（57600）、電台有沒有插好</li>
+          <li><b>開了導引卻不動</b>：看「未發送原因」——最常見是模式不在 AUTO.LOITER、未 arm、或還沒鎖定目標</li>
+          <li><b>座標飄</b>：先做相機校正；有雲台確認 PX4 <code>MNT_MODE_IN=4</code> 且儀表板雲台欄顯示「有回報」</li>
+          <li><b>定翼繞太大/太小圈</b>：UI 繞行半徑與 PX4 <code>NAV_LOITER_RAD</code> 要設一樣的值</li>
+        </ul>
+      </section>
+
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

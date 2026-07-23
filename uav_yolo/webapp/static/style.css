@@ -197,6 +197,62 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .calib-actions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .calib-actions .big-btn { width: 100%; }
 
+/* ---------- 使用說明 ---------- */
+.help-btn {
+  padding: 5px 14px; border-radius: 999px; font-size: .95rem; font-weight: 700;
+  background: #fff; color: var(--amber-deep); border: 2px solid var(--amber);
+  cursor: pointer; transition: background .12s, transform .06s;
+}
+.help-btn:hover { background: var(--amber-soft); }
+.help-btn:active { transform: scale(.96); }
+
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(61, 50, 38, .45);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.modal-overlay[hidden] { display: none; }
+.modal {
+  background: var(--card); border-radius: 16px; border: 1px solid var(--line);
+  width: min(760px, 100%); max-height: 88vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px rgba(61, 50, 38, .3);
+}
+.modal-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 20px; border-bottom: 2px solid var(--line);
+  background: linear-gradient(180deg, #f6eddd, var(--card));
+  border-radius: 16px 16px 0 0;
+}
+.modal-head h2 { font-size: 1.2rem; color: var(--amber-deep); }
+.modal-close {
+  border: none; background: #efe6d5; color: var(--mut); font-size: 1.1rem;
+  width: 36px; height: 36px; border-radius: 50%; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.modal-close:hover { background: var(--red-soft); color: var(--red); }
+.modal-body { padding: 8px 24px 24px; overflow-y: auto; }
+.modal-body section { margin-top: 18px; }
+.modal-body h3 {
+  font-size: 1.02rem; color: var(--amber-deep);
+  border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 8px;
+}
+.modal-body p, .modal-body li { font-size: .95rem; }
+.modal-body ol, .modal-body ul { margin: 4px 0 4px 24px; }
+.modal-body li { margin: 4px 0; }
+.modal-body code {
+  background: #f2ecdf; padding: 1px 7px; border-radius: 6px;
+  font-size: .88rem; color: var(--amber-deep);
+}
+.help-warn {
+  margin-top: 10px; padding: 10px 14px; border-radius: 10px;
+  background: var(--red-soft); font-size: .93rem;
+}
+.help-table { border-collapse: collapse; width: 100%; }
+.help-table td { padding: 5px 10px 5px 0; font-size: .93rem; vertical-align: middle; }
+.help-table .badge { font-size: .85rem; }
+
 @media (max-width: 720px) {
   html { font-size: 16px; }
   .cfg-row > label { min-width: 100%; }

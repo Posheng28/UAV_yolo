@@ -467,5 +467,22 @@ $("#calib-save").addEventListener("click", async () => {
   refreshCalibStatus();
 });
 
+/* ---------------- 使用說明 ---------------- */
+const helpOverlay = $("#help-overlay");
+const openHelp = () => (helpOverlay.hidden = false);
+const closeHelp = () => {
+  helpOverlay.hidden = true;
+  localStorage.setItem("uav_yolo_help_seen", "1");
+};
+$("#btn-help").addEventListener("click", openHelp);
+$("#help-close").addEventListener("click", closeHelp);
+helpOverlay.addEventListener("click", (e) => {
+  if (e.target === helpOverlay) closeHelp();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !helpOverlay.hidden) closeHelp();
+});
+if (!localStorage.getItem("uav_yolo_help_seen")) openHelp(); // 首次進站自動展示
+
 /* ---------------- 啟動 ---------------- */
 poll();

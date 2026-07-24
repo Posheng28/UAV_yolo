@@ -39,8 +39,9 @@
         <span id="video-fps" class="mut"></span>
       </div>
       <div class="zoom-wrap" id="stream-zoom">
-        <img id="stream" src="/stream.mjpg" alt="即時影像">
+        <img id="stream" alt="即時影像">
         <span class="zoom-hint">滾輪縮放｜拖曳平移｜雙擊還原</span>
+        <div id="stream-lost" class="stream-lost" hidden>影像連線中斷，重新連接中…</div>
       </div>
       <div id="video-error" class="warn-line" hidden></div>
     </div>
@@ -125,7 +126,7 @@
     <div class="card">
       <h2>即時畫面</h2>
       <div class="zoom-wrap" id="calib-zoom">
-        <img id="calib-stream" src="/stream.mjpg" alt="校正畫面">
+        <img id="calib-stream" alt="校正畫面">
         <span class="zoom-hint">滾輪縮放｜拖曳平移｜雙擊還原</span>
       </div>
     </div>

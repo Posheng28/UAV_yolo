@@ -127,6 +127,9 @@ sim:
   # 模擬模式參數（system.mode: sim 時生效）
   home: { lat: 24.569890, lon: 120.841928 }
   target_speed_ms: 10.0     # 模擬地面車速
-  stop_after_s: 25.0        # 幾秒後模擬「急停」
+  patrol: true              # true=巡邏(驅→停→轉向→續行，永不停)讓示範一直有動態；測試會設 false
+  patrol_leg_s: 18.0        # 每段行駛秒數
+  patrol_hold_s: 6.0        # 每段結尾短停秒數（順便示範急停收斂）
+  stop_after_s: 25.0        # patrol=false 時：幾秒後永久急停（測試用）
   detection_dropout: [[12.0, 15.0]]  # 模擬盲區（幾秒~幾秒偵測不到）
   pixel_noise_px: 2.0

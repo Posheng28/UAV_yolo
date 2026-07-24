@@ -534,6 +534,39 @@ $("#calib-save").addEventListener("click", async () => {
   refreshCalibStatus();
 });
 
+/* ---------------- 影像輪詢（自癒；取代 MJPEG 長連線） ----------------
+   MJPEG <img> 在伺服器/引擎重啟後會卡死不重連，操作員看到凍結畫面很危險。
+   改成輪詢單幀 /frame.jpg：用 onload 串接下一張（不會塞車），
+   失敗就顯示「連線中斷」並自動重試——任何重啟都能恢復。 */
+function startFramePoller(imgId, { fps = 12, lostId = null } = {}) {
+  const img = document.getElementById(imgId);
+  if (!img) return;
+  const lost = lostId ? document.getElementById(lostId) : null;
+  const minGap = 1000 / fps;
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped) return;
+    const started = performance.now();
+    const probe = new Image();
+    probe.onload = () => {
+      img.src = probe.src;           // 成功才換上去，避免破圖閃爍
+      if (lost) lost.hidden = true;
+      const wait = Math.max(0, minGap - (performance.now() - started));
+      setTimeout(tick, wait);
+    };
+    probe.onerror = () => {
+      if (lost) lost.hidden = false;  // 503/斷線 → 顯示提示、放慢重試
+      setTimeout(tick, 800);
+    };
+    probe.src = "/frame.jpg?t=" + Date.now();
+  };
+  tick();
+  return () => { stopped = true; };
+}
+startFramePoller("stream", { fps: 12, lostId: "stream-lost" });
+startFramePoller("calib-stream", { fps: 10 });
+
 /* ---------------- 影像縮放（滾輪縮放/拖曳平移/雙擊還原） ---------------- */
 function makeZoomable(wrapId) {
   const wrap = document.getElementById(wrapId);

@@ -78,6 +78,7 @@ def lr24_engine(tmp_path):
             "vehicle": {"airframe": "fixedwing"},
             "video": {"width": 960, "height": 540},
             "detector": {"lock_mode": "auto", "min_lock_frames": 6},
+            "sim": {"patrol": False},  # 依賴「急停後圓心收斂」，關掉巡邏
         }
     )
     engine = build_sim_engine(cfg, realtime=False)

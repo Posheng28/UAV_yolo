@@ -84,6 +84,22 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def index():
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/frame.jpg")
+    def frame():
+        """單幀 JPEG。前端用輪詢這個端點取代 MJPEG 長連線——
+        任何伺服器/引擎重啟都能自動恢復，不會卡在死掉的串流上。"""
+        engine = manager.engine
+        jpeg = engine.jpeg_frame() if engine else None
+        if jpeg is None:
+            return JSONResponse({"error": "no frame"}, status_code=503)
+        from fastapi.responses import Response
+
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
     @app.get("/stream.mjpg")
     def stream():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"

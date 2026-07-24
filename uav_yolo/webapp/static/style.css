@@ -100,6 +100,11 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
   font-size: .8rem; font-weight: 700; padding: 3px 10px; border-radius: 999px;
   pointer-events: none;
 }
+.stream-lost {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(35, 32, 27, .82); color: #f7e3e0; font-weight: 700; font-size: 1rem;
+  border-radius: 10px;
+}
 .warn-line { margin-top: 8px; color: var(--red); font-weight: 700; }
 
 /* ---------- 導引卡 ---------- */

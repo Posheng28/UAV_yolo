@@ -52,9 +52,16 @@ class SimWorld:
         # 地面目標：從 home 附近出發直線行駛，stop_after_s 後急停
         self.target_speed = float(sim.get("target_speed_ms", 10.0))
         self.stop_after_s = float(sim.get("stop_after_s", 25.0))
-        heading = math.radians(35.0)
+        # patrol=True：驅→停→轉向→再驅，永不永久停止（讓 UI 示範有動態可看）；
+        # 測試需要「停了就穩定停住觀察收斂」，故 e2e 一律設 patrol:false。
+        self.patrol = bool(sim.get("patrol", False))
+        self.patrol_hold_s = float(sim.get("patrol_hold_s", 6.0))  # 每段結尾停多久
+        self.patrol_leg_s = float(sim.get("patrol_leg_s", 18.0))   # 每段行駛多久
+        self._base_heading = math.radians(35.0)
         self.target_pos = np.array([20.0, 10.0])
-        self.target_vel = self.target_speed * np.array([math.cos(heading), math.sin(heading)])
+        self.target_vel = self.target_speed * np.array(
+            [math.cos(self._base_heading), math.sin(self._base_heading)]
+        )
         self.dropouts = [tuple(w) for w in sim.get("detection_dropout", [])]
         self.pixel_noise = float(sim.get("pixel_noise_px", 2.0))
         self._rng = np.random.default_rng(7)
@@ -100,8 +107,20 @@ class SimWorld:
     def step(self, dt: float = 0.05) -> None:
         self.sim_t += dt
 
-        # 目標：急停邏輯（使用者點名的固定翼痛點場景）
-        if self.sim_t >= self.stop_after_s:
+        if self.patrol:
+            # 巡邏：每段 = 行駛 patrol_leg_s + 停 patrol_hold_s，之後轉 130° 續行（近似三角巡邏、留在畫面內）
+            period = self.patrol_leg_s + self.patrol_hold_s
+            leg = int(self.sim_t // period)
+            phase = self.sim_t % period
+            if phase < self.patrol_leg_s:
+                heading = self._base_heading + leg * math.radians(130.0)
+                self.target_vel = self.target_speed * np.array(
+                    [math.cos(heading), math.sin(heading)]
+                )
+            else:
+                self.target_vel = np.array([0.0, 0.0])  # 段末短停（示範急停收斂）
+        elif self.sim_t >= self.stop_after_s:
+            # 急停邏輯（使用者點名的固定翼痛點場景；測試用）
             self.target_vel = np.array([0.0, 0.0])
         self.target_pos = self.target_pos + self.target_vel * dt
 

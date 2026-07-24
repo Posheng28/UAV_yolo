@@ -27,6 +27,7 @@ def make_cfg(tmp_path, airframe: str) -> Config:
             "vehicle": {"airframe": airframe},
             "video": {"width": 960, "height": 540},
             "detector": {"lock_mode": "auto", "min_lock_frames": 6},
+            "sim": {"patrol": False},  # 測試要「停了就穩定停住」觀察收斂，關掉巡邏
         }
     )
     return cfg

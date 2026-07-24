@@ -65,6 +65,7 @@ class EngineStatus:
     gates: list = field(default_factory=list)
     detections: list = field(default_factory=list)
     guidance_enabled: bool = False
+    guidance_note: str = ""
     last_command: dict | None = None
     camera: dict = field(default_factory=dict)
     mavlink: dict = field(default_factory=dict)
@@ -148,6 +149,7 @@ class TrackerEngine:
         self.last_meas_note = ""
         self.last_known_lla: tuple[float, float] | None = None
         self.gate_report_blocked: list[str] = []
+        self.guidance_note = ""
         self.vehicle_path: deque[tuple[float, float]] = deque(maxlen=600)
         self.target_path: deque[tuple[float, float]] = deque(maxlen=600)
 
@@ -234,6 +236,10 @@ class TrackerEngine:
         self.guidance_enabled = bool(enabled)
         if enabled:
             self.gates.reset_override()  # 重新啟用 = 飛行員把控制權交回來
+            # 清掉上一輪的指令記錄：否則 _run_guidance 的 deadband 會拿「接管前」
+            # 的舊指令點來比，目標若沒怎麼移動就整個不發——閘門全綠但飛機不動，
+            # 而飛行員接管期間可能已經把機體飛到別處了。
+            self.last_cmd = None
 
     def manual_lock(self, track_id: int) -> None:
         self.lock.request_manual_lock(track_id)
@@ -242,6 +248,7 @@ class TrackerEngine:
         self.lock.unlock()
         self.estimator.reset()
         self.state = "SEARCH"
+        self.last_cmd = None  # 換目標後第一筆指令不該被舊 deadband 吃掉
 
     # ------------------------------------------------ 主循環單步
 
@@ -426,7 +433,13 @@ class TrackerEngine:
         if self.last_cmd is not None:
             moved = float(np.linalg.norm(cmd.point_ne - self.last_cmd.point_ne))
             if moved < self.reposition_deadband_m:
+                # 正常節流，但要讓操作員看得出「現在沒在發」的原因，
+                # 否則閘門全綠卻不動會被誤判成系統掛了。
+                self.guidance_note = (
+                    f"目標僅移動 {moved:.1f}m（< {self.reposition_deadband_m:.0f}m 門檻），維持現有指令"
+                )
                 return
+        self.guidance_note = ""
 
         lat, lon, _ = self.georef.ned_to_lla(np.array([cmd.point_ne[0], cmd.point_ne[1], 0.0]))
         alt_amsl = (self.home_alt_amsl or 0.0) + cmd.alt_rel_m
@@ -550,6 +563,7 @@ class TrackerEngine:
             sim=self.sim_mode,
             airframe=self.airframe,
             guidance_enabled=self.guidance_enabled,
+            guidance_note=self.guidance_note,
             video={
                 "connected": getattr(self.video, "connected", True),
                 "fps": round(getattr(self.video, "fps", 0.0), 1),

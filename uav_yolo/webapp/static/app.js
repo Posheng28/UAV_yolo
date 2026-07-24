@@ -71,7 +71,9 @@ function renderStatus(st) {
   // 閘門
   const gates = $("#gate-list");
   if (st.guidance_enabled && st.gates.length === 0) {
-    gates.innerHTML = `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>`;
+    gates.innerHTML = st.guidance_note
+      ? `<div class="gate-item ok">✓ 閘門全通過｜${st.guidance_note}</div>`
+      : `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>`;
   } else if (st.gates.length) {
     gates.innerHTML = st.gates.map((g) => `<div class="gate-item">✗ ${g}</div>`).join("");
   } else {

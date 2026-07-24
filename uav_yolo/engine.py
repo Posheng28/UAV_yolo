@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from .config import Config, PROJECT_ROOT
+from .config import (
+    DEFAULT_INTRINSICS_FILE,
+    DEFAULT_WEIGHTS_FILE,
+    PROJECT_ROOT,
+    Config,
+)
 from .estimation import TargetEstimator
 from .geometry import (
     CameraModel,
@@ -79,9 +84,17 @@ class TrackerEngine:
         self.airframe = cfg.get("vehicle.airframe", "multirotor")
         self.sim_mode = cfg.get("system.mode") == "sim"
 
+        firmware = cfg.get("vehicle.firmware", "px4")
+        if firmware != "px4":
+            # 別讓設定看起來像個支援的開關卻靜默無效：模式表/AUTO.LOITER 白名單/
+            # DO_REPOSITION 語意全是 PX4 專屬的。
+            raise ValueError(
+                f"vehicle.firmware={firmware!r} 不支援；本系統目前僅支援 px4"
+            )
+
         vid = cfg.section("video")
         self.camera_model = CameraModel.load(
-            PROJECT_ROOT / cfg.get("camera.intrinsics_file"),
+            PROJECT_ROOT / (cfg.get("camera.intrinsics_file") or DEFAULT_INTRINSICS_FILE),
             cfg.get("camera.fallback_hfov_deg", 120.0),
             int(vid.get("width", 1280)),
             int(vid.get("height", 720)),
@@ -174,6 +187,48 @@ class TrackerEngine:
             time.sleep(0.005 if progressed else 0.02)
 
     # ------------------------------------------------ UI 操作
+
+    def apply_live_config(self) -> list[str]:
+        """把「不需重建硬體連線」的設定熱套用到執行中的引擎，回傳已套用的項目。
+
+        沒有這個的話，操作員在設定頁把圍欄改嚴、按儲存，UI 沒標 ⟳ 讓他以為
+        生效了，實際上引擎仍抱著建構當下的舊門檻——這是會出事的落差。
+        影像來源/載體/雲台接線/MAVLink 埠等仍需重啟引擎（UI 標 ⟳）。
+        """
+        cfg = self.cfg
+        applied: list[str] = []
+
+        # 安全門檻：就地更新，保留接管閂鎖
+        self.gates.update_limits(cfg.section("safety"), cfg.get("guidance.rate_hz", 1.0))
+        applied.append("safety")
+
+        # 導引參數（載體種類仍需重啟，這裡只換同載體的數值）
+        self.guidance = build_guidance(self.airframe, cfg.section("guidance"))
+        deadband_key = "fixedwing" if self.airframe == "fixedwing" else "multirotor"
+        self.reposition_deadband_m = float(
+            cfg.get(f"guidance.{deadband_key}.reposition_deadband_m", 3.0)
+        )
+        applied.append("guidance")
+
+        # 偵測器閾值與鎖定行為
+        det_cfg = cfg.section("detector")
+        if hasattr(self.detector, "conf"):
+            self.detector.conf = float(det_cfg.get("conf", 0.55))
+        self.lock.mode = det_cfg.get("lock_mode", "auto")
+        self.lock.min_lock_frames = int(det_cfg.get("min_lock_frames", 6))
+        applied.append("detector")
+
+        # 估計器與影像延遲補償
+        est_cfg = cfg.section("estimator")
+        self.estimator.accel_std = float(est_cfg.get("accel_std", 3.0))
+        self.estimator.meas_std = float(est_cfg.get("meas_std", 8.0))
+        self.estimator.gate_sigma = float(est_cfg.get("gate_sigma", 4.0))
+        self.estimator.max_jump_m = float(cfg.get("safety.max_meas_jump_m", 30.0))
+        self.coast_timeout_s = float(est_cfg.get("coast_timeout_s", 8.0))
+        self.video_latency_s = float(cfg.get("video.latency_ms", 0.0)) / 1000.0
+        applied.append("estimator/latency")
+
+        return applied
 
     def set_guidance_enabled(self, enabled: bool) -> None:
         self.guidance_enabled = bool(enabled)
@@ -571,7 +626,7 @@ def create_engine(cfg: Config) -> TrackerEngine:
     from .vision import Detector, VideoSource
 
     det_cfg = cfg.section("detector")
-    weights = det_cfg.get("weights", "weights/best.pt")
+    weights = det_cfg.get("weights") or DEFAULT_WEIGHTS_FILE
     weights_path = PROJECT_ROOT / weights
     detector = Detector(
         weights=str(weights_path if weights_path.exists() else weights),
@@ -584,6 +639,8 @@ def create_engine(cfg: Config) -> TrackerEngine:
         port=cfg.get("mavlink.port", "COM3"),
         baud=int(cfg.get("mavlink.baud", 57600)),
         stream_rates=cfg.get("mavlink.stream_rates", {}),
+        # 與 QGC 同網時可改這個避開 sysid 撞號（QGC 預設也是 255）
+        source_system=int(cfg.get("mavlink.gcs_system_id", 255)),
     )
 
     backend = cfg.get("link.command_backend", "direct")

@@ -33,6 +33,11 @@ python run.py
 > 讀 [`integration/INTEGRATION.md`](integration/INTEGRATION.md)：架構、接點對照、
 > Stage 0 sim → 1 SITL 直連 → 2 SITL 經 LR24 整合 → 3 拆槳桌面 → 4 低風險實飛，
 > 以及四軸用的 [`integration/global_goto_multirotor_patch.md`](integration/global_goto_multirotor_patch.md)。
+>
+> **上場前快速對照**：[`integration/PATH_MATRIX.md`](integration/PATH_MATRIX.md) —
+> 每條路徑（指令後端×影像×雲台×載體）的準備清單、驗證到什麼程度、
+> 哪些只能實機確認。影像鏈路細節另見
+> [`integration/video_walksnail_avatar.md`](integration/video_walksnail_avatar.md)。
 
 開瀏覽器進 `http://127.0.0.1:8600`。**建議第一次先用模擬模式把流程走一遍**：
 看著儀表板等 auto 鎖定 → 開導引 → 在「俯視圖」看載具跟上目標 → 切設定頁把載體

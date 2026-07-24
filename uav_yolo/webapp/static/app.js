@@ -418,7 +418,8 @@ $("#cfg-save").addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(collectPatch()),
   });
-  $("#cfg-msg").textContent = res.note || "已儲存";
+  const applied = (res.applied || []).length ? `（已即時套用：${res.applied.join("、")}）` : "";
+  $("#cfg-msg").textContent = (res.note || "已儲存") + applied;
 });
 
 $("#cfg-testvideo").addEventListener("click", async () => {

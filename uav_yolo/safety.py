@@ -24,6 +24,17 @@ class GateReport:
 
 class SafetyGates:
     def __init__(self, cfg_safety: dict, rate_hz: float):
+        self.pilot_override_latched = False
+        self._last_mode: str | None = None
+        self._last_send_t: float | None = None
+        self.update_limits(cfg_safety, rate_hz)
+
+    def update_limits(self, cfg_safety: dict, rate_hz: float) -> None:
+        """就地更新門檻，**保留接管閂鎖與速率狀態**。
+
+        供 UI 儲存設定時熱套用——把圍欄改嚴後必須立刻生效，
+        不能等到重啟引擎（操作員會以為已經生效）。
+        """
         self.link_timeout_s = float(cfg_safety.get("link_timeout_s", 2.0))
         self.allowed_modes = set(cfg_safety.get("allowed_modes", ["AUTO.LOITER"]))
         self.max_cmd_distance_m = float(cfg_safety.get("max_cmd_distance_m", 500.0))
@@ -38,10 +49,6 @@ class SafetyGates:
         self.gps_max_eph_m = float(cfg_safety.get("gps_max_eph_m", 5.0))
         self.gps_max_epv_m = float(cfg_safety.get("gps_max_epv_m", 8.0))
         self.require_airborne = bool(cfg_safety.get("require_airborne", True))
-
-        self.pilot_override_latched = False
-        self._last_mode: str | None = None
-        self._last_send_t: float | None = None
 
     # ---- 狀態維護 ----
 

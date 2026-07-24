@@ -212,10 +212,17 @@ class TelemetryStore:
 class MavlinkConnection:
     """數傳電台上的 PX4 連線：接收執行緒 + 指令發送（皆執行緒安全）。"""
 
-    def __init__(self, port: str, baud: int, stream_rates: dict[str, int] | None = None):
+    def __init__(
+        self,
+        port: str,
+        baud: int,
+        stream_rates: dict[str, int] | None = None,
+        source_system: int = 255,
+    ):
         self.port = port
         self.baud = baud
         self.stream_rates = stream_rates or {}
+        self.source_system = int(source_system)
         self.store = TelemetryStore()
         self.last_ack: dict[int, tuple[int, float]] = {}  # command -> (result, t)
         self._conn = None
@@ -234,7 +241,8 @@ class MavlinkConnection:
 
         try:
             self._conn = mavutil.mavlink_connection(
-                self.port, baud=self.baud, source_system=255, source_component=190
+                self.port, baud=self.baud,
+                source_system=self.source_system, source_component=190,
             )
         except Exception as exc:  # 埠不存在/被占用
             self.error = f"MAVLink 連線失敗: {exc}"

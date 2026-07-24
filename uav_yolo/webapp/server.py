@@ -24,7 +24,12 @@ from fastapi import Body, FastAPI
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..config import PROJECT_ROOT, Config
+from ..config import (
+    DEFAULT_INTRINSICS_FILE,
+    DEFAULT_WEIGHTS_FILE,
+    PROJECT_ROOT,
+    Config,
+)
 from ..engine import create_engine
 from ..vision.calibration import CalibrationSession
 from ..vision.source import list_video_devices
@@ -126,9 +131,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/api/config")
     def get_config():
-        weights = cfg.get("detector.weights", "")
-        weights_exists = (PROJECT_ROOT / weights).exists() if weights else False
-        intrinsics = PROJECT_ROOT / cfg.get("camera.intrinsics_file", "")
+        weights = cfg.get("detector.weights") or DEFAULT_WEIGHTS_FILE
+        weights_exists = (PROJECT_ROOT / weights).exists()
+        intrinsics = PROJECT_ROOT / (cfg.get("camera.intrinsics_file") or DEFAULT_INTRINSICS_FILE)
         return {
             "config": cfg.as_dict(),
             "meta": {
@@ -141,7 +146,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.put("/api/config")
     def put_config(body: dict = Body(...)):
         cfg.update(body)
-        return {"ok": True, "note": "已存檔；影像來源/載體/MAVLink 等變更需按「重啟引擎」生效"}
+        # 安全/導引/偵測/延遲這些門檻立刻套用到執行中的引擎——
+        # 操作員把圍欄改嚴按下儲存，就必須當場生效，不能等重啟。
+        applied: list[str] = []
+        if manager.engine is not None:
+            try:
+                applied = manager.engine.apply_live_config()
+            except Exception as exc:  # 熱套用失敗不該讓儲存整個失敗
+                return {"ok": True, "note": f"已存檔，但熱套用失敗（請按重啟引擎）：{exc}"}
+        return {
+            "ok": True,
+            "applied": applied,
+            "note": "已存檔並即時套用安全/導引/偵測門檻；標 ⟳ 的項目"
+                    "（影像來源、載體、雲台、MAVLink/LR24 連線）仍需按「重啟引擎」",
+        }
 
     @app.post("/api/restart")
     def restart():
@@ -243,7 +261,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         sess: CalibrationSession | None = calib["session"]
         if sess is None or sess.result is None:
             return JSONResponse({"ok": False, "error": "尚未計算校正結果"}, status_code=400)
-        path = PROJECT_ROOT / cfg.get("camera.intrinsics_file")
+        path = PROJECT_ROOT / (cfg.get("camera.intrinsics_file") or DEFAULT_INTRINSICS_FILE)
         sess.save(str(path))
         return {"ok": True, "path": str(path), "note": "重啟引擎後生效"}
 

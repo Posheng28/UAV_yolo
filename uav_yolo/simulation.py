@@ -17,7 +17,7 @@ import time
 import cv2
 import numpy as np
 
-from .config import Config, PROJECT_ROOT
+from .config import DEFAULT_INTRINSICS_FILE, PROJECT_ROOT, Config
 from .geometry import CameraModel, GeoRef, camera_rotation_gimbal_earth
 from .geometry.frames import wrap_pi
 from .mavlink_io.telemetry import (
@@ -253,7 +253,7 @@ class SimVideoSource:
         self.width = int(vid.get("width", 1280))
         self.height = int(vid.get("height", 720))
         self.camera_model = CameraModel.load(
-            PROJECT_ROOT / cfg.get("camera.intrinsics_file"),
+            PROJECT_ROOT / (cfg.get("camera.intrinsics_file") or DEFAULT_INTRINSICS_FILE),
             cfg.get("camera.fallback_hfov_deg", 120.0),
             self.width,
             self.height,

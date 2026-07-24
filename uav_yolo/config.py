@@ -12,6 +12,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PATH = PROJECT_ROOT / "config" / "default.yaml"
 LOCAL_PATH = PROJECT_ROOT / "config" / "local.yaml"
 
+# 單一事實來源：這兩個路徑在引擎/模擬/webapp 三處都會讀，
+# 各自寫自己的 fallback 會漂移（且 YAML null 不會觸發 dict.get 的預設）。
+DEFAULT_INTRINSICS_FILE = "config/camera_intrinsics.yaml"
+DEFAULT_WEIGHTS_FILE = "weights/best.pt"
+
 
 def _deep_merge(base: dict, override: dict) -> dict:
     """override 蓋到 base 上（巢狀 dict 遞迴合併，其他型別直接取代）。"""

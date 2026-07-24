@@ -7,6 +7,7 @@
     4. 安全：指令速率限制、模式閘門。
 """
 
+import cv2
 import numpy as np
 import pytest
 
@@ -174,6 +175,30 @@ def test_fw_standoff_orbit_never_overflies(fw):
     dists = np.array(dists)
     assert dists.min() > 60.0, f"定翼衝得離目標太近（{dists.min():.0f}m），standoff 失效"
     assert 100.0 < dists.mean() < 210.0, f"平均距離 {dists.mean():.0f}m 偏離軌道半徑"
+
+
+def test_camera_model_follows_actual_frame_size(tmp_path):
+    """採集卡實際輸出與設定不符時，內參要自動對齊實際幀（否則測地差好幾倍）。"""
+    cfg = make_cfg(tmp_path, "multirotor")
+    cfg.update({"video": {"width": 1280, "height": 720}})
+    engine = build_sim_engine(cfg, realtime=False)
+    world = engine.sim_world
+
+    # 假裝來源其實吐 1920x1080（VRX 1080p60 經採集卡的典型情況）
+    real_get = engine.video.get_frame
+    def upscaled():
+        frame, t = real_get()
+        if frame is None:
+            return None, t
+        return cv2.resize(frame, (1920, 1080)), t
+    engine.video.get_frame = upscaled
+
+    fx_before = engine.camera_model.K[0, 0]
+    world.step(DT)
+    engine.step()
+
+    assert engine.camera_model.width == 1920 and engine.camera_model.height == 1080
+    assert engine.camera_model.K[0, 0] == pytest.approx(fx_before * 1920 / 1280, rel=1e-6)
 
 
 def test_video_latency_compensation_removes_geolocation_bias(tmp_path):

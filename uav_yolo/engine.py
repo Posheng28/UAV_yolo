@@ -197,6 +197,12 @@ class TrackerEngine:
         self._last_frame_t = frame_t
         now = self.clock()
 
+        # 採集卡/圖傳不保證會照設定的解析度輸出（例：要求 720p 但 VRX 給 1080p）。
+        # 內參必須對齊「實際幀」尺寸，否則焦距差幾倍、測地整個歪掉。
+        fh, fw = frame.shape[:2]
+        if (fw, fh) != (self.camera_model.width, self.camera_model.height):
+            self.camera_model = self.camera_model.scaled_to(fw, fh)
+
         store = self.link.store
         if self.georef is None and store.home is not None:
             self.georef = GeoRef(store.home.lat, store.home.lon)

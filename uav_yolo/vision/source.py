@@ -98,8 +98,17 @@ class VideoSource:
             if not cap.isOpened():
                 cap.release()
                 continue
+            # 便宜的 HDMI 採集卡多半是 USB2：用預設的 YUY2 未壓縮格式在 1080p
+            # 會被頻寬卡到剩幾 fps。改要 MJPG 才吃得下 1080p30。
+            fourcc = str(self.cfg.get("fourcc", "MJPG")).strip()
+            if fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc[:4]))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 只留最新一幀，別累積延遲
+            except Exception:
+                pass
             ok, _ = cap.read()
             if ok:
                 names = list_video_devices()

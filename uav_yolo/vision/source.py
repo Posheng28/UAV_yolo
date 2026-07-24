@@ -259,9 +259,11 @@ class VideoSource:
                 continue
             # 便宜的 HDMI 採集卡多半是 USB2：用預設的 YUY2 未壓縮格式在 1080p
             # 會被頻寬卡到剩幾 fps。改要 MJPG 才吃得下 1080p30。
-            fourcc = str(self.cfg.get("fourcc", "MJPG")).strip()
-            if fourcc:
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc[:4]))
+            fourcc = str(self.cfg.get("fourcc", "MJPG")).strip().upper()
+            if len(fourcc) == 4:  # VideoWriter_fourcc 需要「剛好」4 字元，少一個就 TypeError
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+            elif fourcc:
+                self.error = f"fourcc 設定「{fourcc}」無效（需 4 字元，如 MJPG），已用裝置預設"
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             try:
@@ -297,13 +299,42 @@ class VideoSource:
             self._cap.release()
         self.connected = False
 
+    def _reconnect(self) -> None:
+        """先放掉舊的、再開新的：DirectShow 相機是獨占的，
+        舊 handle 還握著時第二次開同一台一定失敗 → 重連會永遠打不通。"""
+        self.connected = False
+        if self._cap:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+        try:
+            cap = self._open()
+        except Exception as exc:
+            self.error = f"重新開啟影像來源失敗：{exc}"
+            return
+        if cap is not None:
+            self._cap = cap
+            self.connected = True
+            self.error = None
+
     def _capture_loop(self) -> None:
         fps_t0 = time.monotonic()
         fps_n = 0
         last_good = time.monotonic()
         stall_timeout = float(self.cfg.get("stall_timeout_s", 4.0))
         while not self._stop.is_set():
-            ok, frame = (self._cap.read() if self._cap else (False, None))
+            try:
+                ok, frame = (self._cap.read() if self._cap else (False, None))
+            except Exception as exc:
+                # cv2 偶爾會直接丟例外（驅動/解碼問題）。不擋的話執行緒靜默死掉，
+                # UI 還顯示 connected=True、FPS 停在舊值——操作員完全看不出來。
+                self.error = f"影像擷取異常：{exc}（重試中）"
+                time.sleep(1.0)
+                self._reconnect()
+                last_good = time.monotonic()
+                continue
             now = time.monotonic()
 
             # RTSP／網路來源可能「不報錯但也不再吐新幀」——read() 成功卻停更。
@@ -311,30 +342,19 @@ class VideoSource:
             if ok and frame is not None:
                 last_good = now
             elif now - last_good > stall_timeout and self.mode in ("rtsp", "uvc", "obs"):
-                self.connected = False
                 self.error = f"影像停滯超過 {stall_timeout:.0f}s，重新連線中"
-                if self._cap:
-                    self._cap.release()
-                self._cap = self._open()
-                if self._cap is not None:
-                    self.connected = True
-                    self.error = None
-                    last_good = now
+                self._reconnect()
+                last_good = now
                 continue
 
             if not ok or frame is None:
                 if self.mode == "file" and self._cap is not None:
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 影片檔循環播放
                     continue
-                self.connected = False
                 time.sleep(0.5)
-                new_cap = self._open()  # 圖傳中斷自動重連
-                if new_cap is not None:
-                    if self._cap:
-                        self._cap.release()
-                    self._cap = new_cap
-                    self.connected = True
+                self._reconnect()  # 圖傳中斷自動重連
                 continue
+
             with self._lock:
                 self._frame = frame
                 self._frame_t = now

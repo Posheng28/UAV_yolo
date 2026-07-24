@@ -157,6 +157,9 @@ class Lr24CommandChannel:
     def request_rtl(self) -> None:
         with self._lock:
             self._emergency = "RTL"
+            # 返航是緊急指令：把排隊中的目標丟掉，
+            # 否則 RTL 送出後下一輪又把飛機導回目標——完全違背操作員意圖。
+            self._pending_goto = None
 
     # ---- 生命週期 ----
 

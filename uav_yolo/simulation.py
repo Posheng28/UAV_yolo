@@ -175,7 +175,9 @@ class SimWorld:
         self.store.push_gimbal(GimbalSample(t, 0.0, self.gimbal_pitch, self.gimbal_yaw, yaw_is_earth=True))
         self.store.set_heartbeat(Heartbeat(t, mode="AUTO.LOITER", armed=True))
         # 模擬良好 GPS 與已離地，讓安全閘門在 sim 中可通過
-        self.store.set_gps(GpsSample(t, fix_type=3, satellites=14, eph_m=0.8, epv_m=1.2))
+        self.store.set_gps(
+            GpsSample(t, fix_type=3, satellites=14, eph_m=0.8, epv_m=1.2, hdop=0.7, vdop=1.0)
+        )
         self.store.set_landed(LandedSample(t, landed_state=2))  # 2 = IN_AIR
 
     # ---- 查詢（渲染/測試用） ----

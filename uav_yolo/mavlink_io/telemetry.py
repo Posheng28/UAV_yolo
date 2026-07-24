@@ -66,12 +66,19 @@ class Heartbeat:
 
 @dataclass
 class GpsSample:
-    """GPS_RAW_INT 品質（對應 global_goto_node 的 GPS gate）。"""
+    """GPS_RAW_INT 品質（對應 global_goto_node 的 GPS gate）。
+
+    注意單位：eph_m/epv_m 是「公尺精度」，來自 MAVLink 2 的 h_acc/v_acc（mm）；
+    GPS_RAW_INT 的 eph/epv 欄位其實是 **HDOP/VDOP×100（無因次）**，不是公分——
+    老韌體沒有 h_acc 時退回用 DOP 門檻判斷（hdop/vdop 欄位）。
+    """
     t: float
     fix_type: int
     satellites: int
-    eph_m: float
-    epv_m: float
+    eph_m: float = float("inf")   # h_acc 不可用時為 inf
+    epv_m: float = float("inf")
+    hdop: float | None = None
+    vdop: float | None = None
 
 
 @dataclass
@@ -169,9 +176,11 @@ class TelemetryStore:
             self.last_msg_t = hb.t
 
     def set_home(self, home: Home) -> None:
+        # 最新為準：PX4 會在解鎖時重設 home，rel_alt 的基準跟著變；
+        # 抱著第一筆舊 home 會讓 alt_amsl 換算差掉 home 位移量。
+        # （測地的 NED 原點由引擎的 georef 鎖定第一筆，不受此更新影響。）
         with self._lock:
-            if self.home is None:
-                self.home = home
+            self.home = home
 
     def set_gps(self, gps: GpsSample) -> None:
         with self._lock:
@@ -232,6 +241,8 @@ class MavlinkConnection:
         self._target_sys = 1
         self._target_comp = 1
         self._intervals_requested = False
+        self._last_att_t: float | None = None
+        self._last_interval_req_t = 0.0
         self.error: str | None = None
 
     # ---- 生命週期 ----
@@ -270,7 +281,8 @@ class MavlinkConnection:
         while not self._stop.is_set():
             try:
                 msg = self._conn.recv_match(blocking=True, timeout=0.2)
-            except Exception:
+            except Exception as exc:
+                self.error = f"MAVLink 接收異常：{exc}"  # 別靜默吞掉，UI 要看得到
                 time.sleep(0.1)
                 continue
             if msg is None:
@@ -285,11 +297,18 @@ class MavlinkConnection:
                 self._target_sys = msg.get_srcSystem()
                 armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 self.store.set_heartbeat(Heartbeat(t=now, mode=mode_string(msg.custom_mode), armed=armed))
-                if not self._intervals_requested:
+                # 首次心跳要求串流；之後若「心跳還在但姿態斷流 >5s」（典型＝飛控重開機，
+                # SET_MESSAGE_INTERVAL 全被洗掉）就重新要求，否則遙測永遠回不來。
+                att_stale = self._last_att_t is None or (now - self._last_att_t) > 5.0
+                if not self._intervals_requested or (
+                    att_stale and (now - self._last_interval_req_t) > 5.0
+                ):
                     self._request_intervals()
                     self._intervals_requested = True
+                    self._last_interval_req_t = now
 
             elif mtype == "ATTITUDE":
+                self._last_att_t = now
                 self.store.push_attitude(AttitudeSample(now, msg.roll, msg.pitch, msg.yaw))
 
             elif mtype == "GLOBAL_POSITION_INT":
@@ -317,11 +336,20 @@ class MavlinkConnection:
                 self.store.push_gimbal(GimbalSample(now, roll, pitch, yaw, yaw_is_earth))
 
             elif mtype == "GPS_RAW_INT":
-                # eph/epv 以 cm 傳送；UINT16_MAX 表示未知
-                eph = float("inf") if msg.eph in (0, 65535) else msg.eph / 100.0
-                epv = float("inf") if msg.epv in (0, 65535) else msg.epv / 100.0
+                # 公尺精度來自 MAVLink 2 擴充欄位 h_acc/v_acc（mm）；
+                # eph/epv 是 HDOP/VDOP×100（無因次），別當距離用
+                h_acc = getattr(msg, "h_acc", 0) or 0
+                v_acc = getattr(msg, "v_acc", 0) or 0
                 self.store.set_gps(
-                    GpsSample(now, int(msg.fix_type), int(msg.satellites_visible), eph, epv)
+                    GpsSample(
+                        t=now,
+                        fix_type=int(msg.fix_type),
+                        satellites=int(msg.satellites_visible),
+                        eph_m=(h_acc / 1000.0) if h_acc > 0 else float("inf"),
+                        epv_m=(v_acc / 1000.0) if v_acc > 0 else float("inf"),
+                        hdop=None if msg.eph in (0, 65535) else msg.eph / 100.0,
+                        vdop=None if msg.epv in (0, 65535) else msg.epv / 100.0,
+                    )
                 )
 
             elif mtype == "EXTENDED_SYS_STATE":

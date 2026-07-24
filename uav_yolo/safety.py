@@ -48,6 +48,9 @@ class SafetyGates:
         self.gps_min_satellites = int(cfg_safety.get("gps_min_satellites", 8))
         self.gps_max_eph_m = float(cfg_safety.get("gps_max_eph_m", 5.0))
         self.gps_max_epv_m = float(cfg_safety.get("gps_max_epv_m", 8.0))
+        # 老韌體沒有 h_acc/v_acc（公尺精度）時退回 DOP 門檻
+        self.gps_max_hdop = float(cfg_safety.get("gps_max_hdop", 2.5))
+        self.gps_max_vdop = float(cfg_safety.get("gps_max_vdop", 3.5))
         self.require_airborne = bool(cfg_safety.get("require_airborne", True))
 
     # ---- 狀態維護 ----
@@ -113,14 +116,26 @@ class SafetyGates:
             if gps is None:
                 blocked.append("尚未收到 GPS 品質（GPS_RAW_INT）")
             else:
+                import math as _math
+
                 if gps.fix_type < self.gps_min_fix_type:
                     blocked.append(f"GPS fix_type={gps.fix_type} < {self.gps_min_fix_type}")
                 if gps.satellites < self.gps_min_satellites:
                     blocked.append(f"GPS 衛星數 {gps.satellites} < {self.gps_min_satellites}")
-                if gps.eph_m > self.gps_max_eph_m:
-                    blocked.append(f"GPS 水平誤差 {gps.eph_m:.1f}m > {self.gps_max_eph_m}m")
-                if gps.epv_m > self.gps_max_epv_m:
-                    blocked.append(f"GPS 垂直誤差 {gps.epv_m:.1f}m > {self.gps_max_epv_m}m")
+                # 優先用公尺精度（h_acc/v_acc）；沒有就退 DOP；兩者皆無 → 擋下
+                if _math.isfinite(gps.eph_m):
+                    if gps.eph_m > self.gps_max_eph_m:
+                        blocked.append(f"GPS 水平誤差 {gps.eph_m:.1f}m > {self.gps_max_eph_m}m")
+                elif gps.hdop is not None:
+                    if gps.hdop > self.gps_max_hdop:
+                        blocked.append(f"GPS HDOP {gps.hdop:.1f} > {self.gps_max_hdop}")
+                else:
+                    blocked.append("GPS 未提供水平精度（h_acc/HDOP 皆無）")
+                if _math.isfinite(gps.epv_m):
+                    if gps.epv_m > self.gps_max_epv_m:
+                        blocked.append(f"GPS 垂直誤差 {gps.epv_m:.1f}m > {self.gps_max_epv_m}m")
+                elif gps.vdop is not None and gps.vdop > self.gps_max_vdop:
+                    blocked.append(f"GPS VDOP {gps.vdop:.1f} > {self.gps_max_vdop}")
         if not est_initialized:
             blocked.append("尚未鎖定目標")
         elif est_age_s > coast_timeout_s:

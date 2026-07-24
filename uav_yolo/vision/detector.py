@@ -105,11 +105,14 @@ class Detector:
 class TargetLock:
     """單一目標鎖定狀態機（純邏輯，可獨立測試）。"""
 
+    PENDING_EXPIRE_FRAMES = 60  # 點選的 ID 若 ~3 秒內沒出現就放棄（防舊 ID 之後亂劫持）
+
     def __init__(self, mode: str = "auto", min_lock_frames: int = 6):
         self.mode = mode  # auto | manual
         self.min_lock_frames = int(min_lock_frames)
         self.locked_id: int | None = None
         self.pending_manual_id: int | None = None
+        self._pending_age = 0
         self._candidate_id: int | None = None
         self._candidate_streak = 0
 
@@ -119,12 +122,14 @@ class TargetLock:
 
     def request_manual_lock(self, track_id: int) -> None:
         self.pending_manual_id = int(track_id)
+        self._pending_age = 0
 
     def unlock(self) -> None:
         self.locked_id = None
         self._candidate_id = None
         self._candidate_streak = 0
         self.pending_manual_id = None
+        self._pending_age = 0
 
     def update(self, detections: list[Detection]) -> Detection | None:
         """每幀呼叫，回傳目前鎖定目標的偵測（本幀沒看到回 None）。"""
@@ -135,8 +140,16 @@ class TargetLock:
             if self.pending_manual_id in by_id:
                 self.locked_id = self.pending_manual_id
                 self.pending_manual_id = None
-            elif self.mode == "manual":
-                return None  # 等點選的 ID 出現
+                self._pending_age = 0
+            else:
+                # 點選的 ID 一直沒出現就放棄：ByteTrack ID 不會回收，
+                # 但偵測器重啟後可能重複——過期的 pending 之後突然「劫持」鎖定很危險
+                self._pending_age += 1
+                if self._pending_age >= self.PENDING_EXPIRE_FRAMES:
+                    self.pending_manual_id = None
+                    self._pending_age = 0
+                elif self.mode == "manual":
+                    return None  # 等點選的 ID 出現
 
         if self.locked_id is not None:
             return by_id.get(self.locked_id)

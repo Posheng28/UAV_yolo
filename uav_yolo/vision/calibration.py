@@ -53,15 +53,26 @@ class CalibrationSession:
         return corners
 
     def capture(self, frame) -> bool:
-        """本幀找得到棋盤就收錄一張，回傳是否成功。"""
+        """本幀找得到棋盤就收錄一張，回傳是否成功。
+
+        解析度改變（換來源/換設定）時混入不同尺寸的樣本會讓校正整組錯掉，
+        直接拒收；新增樣本也會作廢先前算好的結果（必須重算）。
+        """
         corners = self.find_corners(frame)
         if corners is None:
             return False
         with self._lock:
             h, w = frame.shape[:2]
+            if self.image_size is not None and self.image_size != (w, h):
+                self.last_found = False
+                raise ValueError(
+                    f"影像尺寸改變（{self.image_size[0]}x{self.image_size[1]} → {w}x{h}）；"
+                    "請按「開始/重來」重新收集"
+                )
             self.image_size = (w, h)
             self.obj_points.append(self._objp.copy())
             self.img_points.append(corners)
+            self.result = None  # 樣本已變，舊結果作廢
         return True
 
     def compute(self) -> dict:

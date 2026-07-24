@@ -267,8 +267,9 @@ class TrackerEngine:
 
         store = self.link.store
         if self.georef is None and store.home is not None:
-            self.georef = GeoRef(store.home.lat, store.home.lon)
-            self.home_alt_amsl = store.home.alt_amsl
+            self.georef = GeoRef(store.home.lat, store.home.lon)  # NED 原點鎖第一筆，保持連續
+        if store.home is not None:
+            self.home_alt_amsl = store.home.alt_amsl  # 高度基準用最新（PX4 解鎖時會重設 home）
 
         detections = self.detector.detect(frame)
         locked_det = self.lock.update(detections)

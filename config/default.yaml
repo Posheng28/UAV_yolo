@@ -92,8 +92,10 @@ safety:
   require_gps_quality: true
   gps_min_fix_type: 3        # 3=3D fix
   gps_min_satellites: 8
-  gps_max_eph_m: 5.0
+  gps_max_eph_m: 5.0   # 公尺精度（來自 MAVLink 2 h_acc；PX4 有發）
   gps_max_epv_m: 8.0
+  gps_max_hdop: 2.5    # 老韌體沒 h_acc 時退回 DOP 門檻（GPS_RAW_INT.eph=HDOP×100）
+  gps_max_vdop: 3.5
   require_airborne: true     # 未離地不發導引指令（本系統不負責起飛）
 
 mavlink:

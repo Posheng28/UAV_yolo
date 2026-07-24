@@ -232,7 +232,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         frame = engine.raw_frame()
         if frame is None:
             return JSONResponse({"ok": False, "error": "目前沒有影像"}, status_code=400)
-        found = sess.capture(frame)
+        try:
+            found = sess.capture(frame)
+        except ValueError as exc:  # 解析度中途改變
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return {"ok": True, "found": found, "count": sess.count}
 
     @app.post("/api/calib/compute")

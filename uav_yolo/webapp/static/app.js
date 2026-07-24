@@ -63,10 +63,14 @@ function renderStatus(st) {
     (st.airframe === "fixedwing" ? "定翼" : "旋翼") + "・" + (stateNames[st.state] || st.state);
   stateBadge.className = "badge st-" + st.state;
 
-  // 導引開關
+  // 導引開關（arming＝待確認狀態，poll 不可覆寫掉提示）
   const btn = $("#btn-guidance");
-  btn.textContent = st.guidance_enabled ? "導引：啟用中（點擊關閉）" : "導引：關閉（點擊啟用）";
-  btn.className = "big-btn " + (st.guidance_enabled ? "on" : "off");
+  if (btn.classList.contains("arming")) {
+    btn.textContent = "⚠ 再點一次確認啟用導引（4 秒內）";
+  } else {
+    btn.textContent = st.guidance_enabled ? "導引：啟用中（點擊關閉）" : "導引：關閉（點擊啟用）";
+    btn.className = "big-btn " + (st.guidance_enabled ? "on" : "off");
+  }
 
   // 閘門
   const gates = $("#gate-list");
@@ -205,12 +209,35 @@ function drawMap(st) {
 }
 
 /* ---------------- 導引開關 / 解鎖 ---------------- */
+// 啟用導引＝安全關鍵動作，用「頁內兩段式確認」而非原生 confirm()：
+// confirm 對話框一旦被使用者勾選「不再顯示對話方塊」就會靜默回 false，
+// 按鈕看起來就像壞掉。頁內確認不受此影響，且意圖更明確。
+let armTimer = null;
+function disarmGuidance() {
+  clearTimeout(armTimer);
+  armTimer = null;
+  const btn = $("#btn-guidance");
+  btn.classList.remove("arming");
+}
 $("#btn-guidance").addEventListener("click", async () => {
+  const btn = $("#btn-guidance");
   const enabled = lastStatus && lastStatus.guidance_enabled;
-  if (!enabled) {
-    if (!confirm("確認啟用導引？系統將開始向飛控發送位置指令（載具需在 AUTO.LOITER/Hold 模式）。")) return;
+
+  if (enabled) {          // 關閉不需確認
+    disarmGuidance();
+    await post("/api/guidance", { enabled: false });
+    return;
   }
-  await post("/api/guidance", { enabled: !enabled });
+
+  if (armTimer) {         // 第二次點擊：確認啟用
+    disarmGuidance();
+    await post("/api/guidance", { enabled: true });
+    return;
+  }
+
+  // 第一次點擊：進入待確認狀態，4 秒內沒再點就自動取消
+  btn.classList.add("arming");
+  armTimer = setTimeout(disarmGuidance, 4000);
 });
 $("#btn-unlock").addEventListener("click", () => post("/api/unlock"));
 

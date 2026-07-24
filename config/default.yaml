@@ -19,9 +19,16 @@ video:
   uvc_index: 1
   obs_name_hint: "OBS Virtual Camera"
   rtsp_url: "rtsp://192.168.144.25:8554/main"
+  rtsp_transport: udp   # udp=低延遲（建議）| tcp=較穩但延遲高，弱訊號才考慮
   file_path: ""
   width: 1280
   height: 720
+  # 影像鏈路固定延遲（ms）：從「鏡頭曝光」到「這台電腦拿到該幀」。
+  # 系統會用 (到達時刻 − 此值) 去取當時的姿態/位置做測地，未補償會有
+  # 「延遲 × 飛行速度」的系統性偏移（20m/s × 300ms = 6m）。
+  # 量法：鏡頭對著手機碼錶，比較畫面顯示時間與電腦時間的差。
+  # 參考值：類比 FPV＋採集卡 ~50-150；數位圖傳/RTSP ~150-400（實測為準）。
+  latency_ms: 0
 
 camera:
   # 校正結果檔（UI 校正頁產生）。檔案不存在時退回用 fallback_hfov_deg 近似

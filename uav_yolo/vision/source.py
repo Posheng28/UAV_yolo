@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -60,8 +61,21 @@ class VideoSource:
         if mode == "rtsp":
             url = self.cfg.get("rtsp_url", "")
             self.device_label = url
+            # OpenCV/FFMPEG 預設會緩衝數秒——對追蹤是致命的。
+            # 走 UDP、關 buffer、低延遲旗標；必須在建立 VideoCapture 前設好環境變數。
+            transport = self.cfg.get("rtsp_transport", "udp")
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                f"rtsp_transport;{transport}|fflags;nobuffer|flags;low_delay|max_delay;0|reorder_queue_size;0"
+            )
             cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            return cap if cap.isOpened() else None
+            if not cap.isOpened():
+                cap.release()
+                return None
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 只留最新一幀
+            except Exception:
+                pass
+            return cap
 
         if mode == "file":
             path = self.cfg.get("file_path", "")

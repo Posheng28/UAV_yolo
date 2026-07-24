@@ -176,6 +176,45 @@ def test_fw_standoff_orbit_never_overflies(fw):
     assert 100.0 < dists.mean() < 210.0, f"平均距離 {dists.mean():.0f}m 偏離軌道半徑"
 
 
+def test_video_latency_compensation_removes_geolocation_bias(tmp_path):
+    """圖傳延遲未補償會造成系統性測地偏移；設定 latency_ms 後應顯著改善。
+
+    做法：讓影像來源回報「舊」的時間戳（模擬 300ms 鏈路延遲），
+    比較 latency_ms=0 與 latency_ms=300 兩者的測地誤差。
+    """
+    LAG = 0.3
+
+    def run(latency_ms):
+        cfg = make_cfg(tmp_path / f"c{latency_ms}", "multirotor")
+        cfg.update({"video": {"latency_ms": latency_ms}})
+        engine = build_sim_engine(cfg, realtime=False)
+        world = engine.sim_world
+
+        # 包裝影像來源：畫面內容是「現在」，但時間戳謊報成 now（即實際延遲 LAG）
+        real_get = engine.video.get_frame
+        def lagged():
+            frame, t = real_get()
+            return frame, (None if t is None else t + LAG)
+        engine.video.get_frame = lagged
+
+        # 載具持續移動，延遲才會轉成位置誤差
+        world.veh_vel = np.array([12.0, 0.0])
+        errs = []
+        for _ in range(int(12.0 / DT)):
+            world.step(DT)
+            world.veh_pos = world.veh_pos + np.array([12.0, 0.0]) * DT
+            engine.step()
+            if engine.estimator.initialized:
+                errs.append(float(np.linalg.norm(engine.estimator.pos_ne - world.target_pos)))
+        return float(np.mean(errs[-40:])) if len(errs) >= 40 else float("inf")
+
+    err_uncompensated = run(0)
+    err_compensated = run(int(LAG * 1000))
+
+    assert err_compensated < err_uncompensated, (
+        f"補償後誤差沒有改善：{err_compensated:.1f}m vs {err_uncompensated:.1f}m")
+
+
 def test_fw_gimbal_keeps_target_in_view_while_orbiting(fw):
     engine, world = fw
     crank(engine, world, 40.0)  # 已進軌道

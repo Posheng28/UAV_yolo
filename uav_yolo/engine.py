@@ -144,6 +144,8 @@ class TrackerEngine:
         self._status_lock = threading.Lock()
         self._status = EngineStatus()
         self._last_frame_t: float | None = None
+        self._last_capture_t: float | None = None
+        self.video_latency_s = float(cfg.get("video.latency_ms", 0.0)) / 1000.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._loop_times: deque[float] = deque(maxlen=30)
@@ -203,16 +205,22 @@ class TrackerEngine:
         detections = self.detector.detect(frame)
         locked_det = self.lock.update(detections)
 
-        pos = store.position_at(frame_t)
-        att = store.attitude_at(frame_t)
+        # 影像鏈路有固定延遲（RTSP/數位圖傳可達數百 ms）：這一幀「拍的是」
+        # capture_t 當下的世界，而不是它送達的時刻。整條感知鏈統一用 capture_t，
+        # 才會拿到當時的姿態/位置。20 m/s 下 300ms 未補償 = 6m 測地誤差。
+        capture_t = frame_t - self.video_latency_s
+        self._last_capture_t = capture_t
 
-        self.estimator.predict_to(frame_t)
+        pos = store.position_at(capture_t)
+        att = store.attitude_at(capture_t)
+
+        self.estimator.predict_to(capture_t)
 
         measured = False
         if locked_det is not None and pos is not None and self.georef is not None:
-            hit_ne = self._geolocate(locked_det, pos, att, frame_t)
+            hit_ne = self._geolocate(locked_det, pos, att, capture_t)
             if hit_ne is not None:
-                ok, note = self.estimator.update(frame_t, hit_ne)
+                ok, note = self.estimator.update(capture_t, hit_ne)
                 self.last_meas_note = note
                 measured = ok
 
@@ -224,9 +232,9 @@ class TrackerEngine:
             and self.georef is not None
             and detections
         ):
-            self._try_reacquire(detections, pos, att, frame_t)
+            self._try_reacquire(detections, pos, att, capture_t)
 
-        self._update_state_machine(frame_t, measured)
+        self._update_state_machine(capture_t, measured)
 
         if pos is not None:
             ned = self.georef.lla_to_ned(pos.lat, pos.lon, pos.rel_alt) if self.georef else None
@@ -343,7 +351,8 @@ class TrackerEngine:
             armed=armed,
             link_ok=link_ok,
             est_initialized=self.estimator.initialized,
-            est_age_s=self.estimator.time_since_update(now if self._last_frame_t is None else self._last_frame_t),
+            est_age_s=self.estimator.time_since_update(
+                now if self._last_capture_t is None else self._last_capture_t),
             coast_timeout_s=self.coast_timeout_s,
             cmd_point_ne=cmd.point_ne if cmd else None,
             gps=getattr(store, "gps", None),
@@ -463,7 +472,7 @@ class TrackerEngine:
 
         target: dict = {"initialized": self.estimator.initialized}
         if self.estimator.initialized:
-            age = self.estimator.time_since_update(self._last_frame_t or now)
+            age = self.estimator.time_since_update(self._last_capture_t or now)
             p = self.estimator.pos_ne
             target.update(
                 n=float(p[0]), e=float(p[1]),
@@ -531,7 +540,7 @@ class TrackerEngine:
             gimbal={
                 "present": self.gimbal_present,
                 "control": self.gimbal_control,
-                "has_feedback": store.gimbal_at(self._last_frame_t or now) is not None,
+                "has_feedback": store.gimbal_at(self._last_capture_t or now) is not None,
             },
             loop_hz=round(loop_hz, 1),
         )

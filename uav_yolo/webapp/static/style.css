@@ -78,8 +78,27 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 
 .video-head { display: flex; justify-content: space-between; margin-bottom: 8px; font-weight: 700; }
 #stream, #calib-stream {
-  width: 100%; border-radius: 10px; background: #23201b; display: block;
+  width: 100%; background: #23201b; display: block;
   min-height: 160px;
+  transform-origin: 0 0; user-select: none; -webkit-user-drag: none;
+}
+.zoom-wrap {
+  position: relative; overflow: hidden; border-radius: 10px; background: #23201b;
+}
+.zoom-wrap.zoomed { cursor: grab; }
+.zoom-wrap.zoomed:active { cursor: grabbing; }
+.zoom-hint {
+  position: absolute; right: 10px; bottom: 10px;
+  background: rgba(35, 32, 27, .7); color: #e8dfd0;
+  font-size: .75rem; padding: 3px 12px; border-radius: 999px;
+  opacity: 0; transition: opacity .15s; pointer-events: none;
+}
+.zoom-wrap:hover .zoom-hint { opacity: 1; }
+.zoom-level {
+  position: absolute; left: 10px; top: 10px;
+  background: rgba(35, 32, 27, .7); color: #f3e7d2;
+  font-size: .8rem; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+  pointer-events: none;
 }
 .warn-line { margin-top: 8px; color: var(--red); font-weight: 700; }
 

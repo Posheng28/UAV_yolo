@@ -38,7 +38,10 @@
         <span id="video-label">影像</span>
         <span id="video-fps" class="mut"></span>
       </div>
-      <img id="stream" src="/stream.mjpg" alt="即時影像">
+      <div class="zoom-wrap" id="stream-zoom">
+        <img id="stream" src="/stream.mjpg" alt="即時影像">
+        <span class="zoom-hint">滾輪縮放｜拖曳平移｜雙擊還原</span>
+      </div>
       <div id="video-error" class="warn-line" hidden></div>
     </div>
 
@@ -121,7 +124,10 @@
   <div class="calib-grid">
     <div class="card">
       <h2>即時畫面</h2>
-      <img id="calib-stream" src="/stream.mjpg" alt="校正畫面">
+      <div class="zoom-wrap" id="calib-zoom">
+        <img id="calib-stream" src="/stream.mjpg" alt="校正畫面">
+        <span class="zoom-hint">滾輪縮放｜拖曳平移｜雙擊還原</span>
+      </div>
     </div>
     <div class="card">
       <h2>棋盤格校正</h2>

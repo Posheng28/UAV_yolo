@@ -507,6 +507,62 @@ $("#calib-save").addEventListener("click", async () => {
   refreshCalibStatus();
 });
 
+/* ---------------- 影像縮放（滾輪縮放/拖曳平移/雙擊還原） ---------------- */
+function makeZoomable(wrapId) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  const img = wrap.querySelector("img");
+  let scale = 1, tx = 0, ty = 0, dragging = false, lastX = 0, lastY = 0;
+  let levelEl = null;
+
+  const apply = () => {
+    const r = wrap.getBoundingClientRect();
+    // 平移夾在邊界內：畫面永遠被影像蓋滿，不露出黑邊外的空洞
+    tx = Math.min(0, Math.max(r.width - r.width * scale, tx));
+    ty = Math.min(0, Math.max(r.height - r.height * scale, ty));
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    wrap.classList.toggle("zoomed", scale > 1.001);
+    if (scale > 1.001) {
+      if (!levelEl) {
+        levelEl = document.createElement("span");
+        levelEl.className = "zoom-level";
+        wrap.appendChild(levelEl);
+      }
+      levelEl.textContent = `${scale.toFixed(1)}×`;
+    } else if (levelEl) {
+      levelEl.remove();
+      levelEl = null;
+    }
+  };
+
+  wrap.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const prev = scale;
+    scale = Math.min(8, Math.max(1, scale * (e.deltaY < 0 ? 1.25 : 0.8)));
+    // 以游標位置為錨點縮放（放大時游標下的東西不跑掉）
+    tx = mx - ((mx - tx) * scale) / prev;
+    ty = my - ((my - ty) * scale) / prev;
+    apply();
+  }, { passive: false });
+
+  wrap.addEventListener("mousedown", (e) => {
+    if (scale > 1) { dragging = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    tx += e.clientX - lastX; ty += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    apply();
+  });
+  window.addEventListener("mouseup", () => (dragging = false));
+  wrap.addEventListener("dblclick", () => { scale = 1; tx = 0; ty = 0; apply(); });
+  img.addEventListener("dragstart", (e) => e.preventDefault());
+}
+makeZoomable("stream-zoom");
+makeZoomable("calib-zoom");
+
 /* ---------------- 使用說明 ---------------- */
 const helpOverlay = $("#help-overlay");
 const openHelp = () => (helpOverlay.hidden = false);

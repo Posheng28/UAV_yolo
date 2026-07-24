@@ -152,6 +152,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def devices():
         return {"devices": list_video_devices()}
 
+    @app.post("/api/video/test")
+    def video_test(body: dict = Body(default={})):
+        """起飛前測試影像來源：回報實際解析度/fps，不動到執行中的引擎。"""
+        from ..vision.source import probe_source
+
+        video_cfg = dict(cfg.section("video"))
+        video_cfg.update(body or {})  # 允許帶入尚未儲存的設定先試
+        return probe_source(video_cfg)
+
     # ---------------- 檢查清單 ----------------
 
     @app.get("/api/checklist")

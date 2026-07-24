@@ -299,7 +299,8 @@ const FIELDS = [
   { path: "video.uvc_index", label: "採集卡索引", type: "number", hint: "名稱留空時用 ⟳" },
   { path: "video.rtsp_url", label: "RTSP 網址", type: "text", hint: "例 rtsp://192.168.144.25:8554/main；相機請設固定 IP ⟳" },
   { path: "video.rtsp_transport", label: "RTSP 傳輸", type: "select",
-    options: [["udp", "UDP（低延遲，建議）"], ["tcp", "TCP（較穩、延遲高）"]], hint: "弱訊號掉格嚴重才換 TCP ⟳" },
+    options: [["auto", "自動（先 UDP 不通退 TCP，建議）"], ["udp", "UDP（最低延遲）"], ["tcp", "TCP（網路擋 UDP 時）"]],
+    hint: "UDP 延遲最低；有些網路會擋，auto 會自動退 TCP ⟳" },
   { path: "video.latency_ms", label: "圖傳延遲 ms", type: "number",
     hint: "曝光→本機收到的固定延遲。未補償會有「延遲×飛行速度」的測地偏移（20m/s×300ms=6m）。鏡頭拍手機碼錶可量" },
   { sec: "偵測" },
@@ -418,6 +419,24 @@ $("#cfg-save").addEventListener("click", async () => {
     body: JSON.stringify(collectPatch()),
   });
   $("#cfg-msg").textContent = res.note || "已儲存";
+});
+
+$("#cfg-testvideo").addEventListener("click", async () => {
+  const box = $("#video-test-result");
+  box.hidden = false;
+  box.textContent = "測試中…（RTSP 可能要數秒）";
+  // 用目前表單上的值試，不必先儲存
+  const patch = collectPatch();
+  const res = await post("/api/video/test", (patch && patch.video) || {});
+  if (res.ok) {
+    box.innerHTML =
+      `<b>✓ 影像來源正常</b>（${res.mode}）<br>` +
+      `來源：${res.device || "—"}<br>` +
+      `實際解析度：<b>${res.width}×${res.height}</b>｜擷取速率：約 ${res.fps ?? "—"} FPS<br>` +
+      `<span class="mut">校正請用這個實際解析度重做；GStreamer：${res.gstreamer ? "可用（RTSP 延遲更低）" : "未編入（用 FFMPEG）"}</span>`;
+  } else {
+    box.innerHTML = `<b>✗ 測試失敗</b>（${res.mode}）<br>${res.error || "未知錯誤"}`;
+  }
 });
 
 $("#cfg-restart").addEventListener("click", async () => {

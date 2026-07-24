@@ -35,6 +35,166 @@ def _find_device_index(name_hint: str) -> int | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# RTSP 支援
+# ---------------------------------------------------------------------------
+
+def has_gstreamer() -> bool:
+    """pip 版 opencv-python 通常沒編 GStreamer；有的話 RTSP 延遲會更低。"""
+    try:
+        info = cv2.getBuildInformation()
+    except Exception:
+        return False
+    for line in info.splitlines():
+        if "GStreamer" in line:
+            return "YES" in line.upper()
+    return False
+
+
+def build_gst_pipeline(url: str, transport: str = "udp", timeout_s: float = 5.0) -> str:
+    """低延遲 GStreamer RTSP pipeline（codec 無關，靠 decodebin）。
+
+    latency=0 + drop=true + max-buffers=1 才不會累積緩衝——這正是 RTSP
+    追蹤最容易踩的坑（預設緩衝可以到好幾秒）。
+    """
+    proto = "tcp" if transport == "tcp" else "udp"
+    return (
+        f"rtspsrc location={url} latency=0 protocols={proto} "
+        f"tcp-timeout={int(timeout_s * 1_000_000)} timeout={int(timeout_s * 1_000_000)} ! "
+        "rtpjitterbuffer latency=0 drop-on-latency=true ! "
+        "decodebin ! videoconvert ! "
+        "appsink drop=true sync=false max-buffers=1"
+    )
+
+
+def _ffmpeg_rtsp_options(transport: str, timeout_s: float = 5.0) -> str:
+    # stimeout/timeout 單位是「微秒」。不設的話，連不到的位址會讓
+    # VideoCapture 卡住非常久——UI 會凍住，飛行中擷取執行緒也會僵死。
+    # 新舊 FFmpeg 對 rtsp 分別認 stimeout / timeout，兩個都給。
+    us = int(timeout_s * 1_000_000)
+    return (
+        f"rtsp_transport;{transport}|fflags;nobuffer|flags;low_delay"
+        f"|max_delay;0|reorder_queue_size;0|stimeout;{us}|timeout;{us}|rw_timeout;{us}"
+    )
+
+
+def _open_with_timeout(open_fn, timeout_s: float):
+    """在背景執行緒開串流並限時等待；逾時就放棄並交給背景回收。
+
+    為什麼要這樣做：OpenCV 4.11 的 FFMPEG 後端內建 30 秒中斷逾時，
+    **實測 `OPENCV_FFMPEG_OPEN_TIMEOUT_MS` / `READ_TIMEOUT_MS` 環境變數
+    完全不生效**（連 import cv2 前就設也一樣），串流層的 stimeout/timeout
+    也管不到它。位址打錯或圖傳沒開時會整整卡 30 秒——UI 凍住、飛行中擷取
+    執行緒僵死。唯一可靠的辦法就是自己在外面限時。
+    """
+    holder: dict = {}
+    done = threading.Event()
+
+    def worker():
+        try:
+            holder["cap"] = open_fn()
+        except Exception as exc:
+            holder["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, daemon=True, name="rtsp-open").start()
+
+    if done.wait(timeout_s):
+        return holder.get("cap")
+
+    def reap():  # 逾時後仍要把最終冒出來的 cap 釋放掉，別洩漏
+        done.wait()
+        late = holder.get("cap")
+        if late is not None:
+            try:
+                late.release()
+            except Exception:
+                pass
+
+    threading.Thread(target=reap, daemon=True, name="rtsp-open-reap").start()
+    return None
+
+
+def open_rtsp(
+    url: str, transport: str, backend: str = "auto", timeout_s: float = 5.0
+) -> tuple[cv2.VideoCapture | None, str]:
+    """開一路 RTSP，回 (cap, 實際用的描述)。失敗回 (None, 原因)。"""
+    if backend in ("auto", "gstreamer") and has_gstreamer():
+        pipeline = build_gst_pipeline(url, transport, timeout_s)
+        cap = _open_with_timeout(
+            lambda: cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER), timeout_s)
+        if cap is not None and cap.isOpened():
+            return cap, f"gstreamer/{transport}"
+        if cap is not None:
+            cap.release()
+        if backend == "gstreamer":
+            return None, "GStreamer 開啟失敗或逾時"
+
+    # FFMPEG：選項必須在建立 VideoCapture 之前寫進環境變數。
+    # 注意：OpenCV 的 FFMPEG 後端有「自己的」中斷逾時（預設 30 秒），
+    # 上面的 stimeout/timeout 串流選項管不到它——連不到的位址會整整卡 30 秒
+    # （實測會噴 "Stream timeout triggered after 30042ms"）。真正的旋鈕是這兩個
+    # OpenCV 層級環境變數，必須在建立 VideoCapture 前設好。
+    timeout_ms = str(int(timeout_s * 1000))
+    os.environ["OPENCV_FFMPEG_OPEN_TIMEOUT_MS"] = timeout_ms
+    os.environ["OPENCV_FFMPEG_READ_TIMEOUT_MS"] = timeout_ms
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_rtsp_options(transport, timeout_s)
+    cap = _open_with_timeout(lambda: cv2.VideoCapture(url, cv2.CAP_FFMPEG), timeout_s)
+    if cap is None:
+        return None, f"RTSP 連線逾時 {timeout_s:.0f}s（{transport}）"
+    if cap.isOpened():
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        return cap, f"ffmpeg/{transport}"
+    cap.release()
+    return None, f"無法開啟 RTSP（{transport}）"
+
+
+def probe_source(cfg_video: dict, sample_frames: int = 12) -> dict:
+    """起飛前測試：照目前設定開一次來源，量實際解析度與 fps。
+
+    不影響執行中的引擎（RTSP 可多開一路；UVC 若被佔用會回報 busy）。
+    """
+    src = VideoSource(dict(cfg_video))
+    cap = src._open()
+    if cap is None:
+        return {
+            "ok": False,
+            "error": src.error or f"無法開啟來源（{src.mode}）；"
+                                  f"{'裝置可能被佔用（關掉 OBS/其他程式）' if src.mode in ('uvc', 'obs') else '檢查網址與網段'}",
+            "mode": src.mode,
+        }
+    try:
+        t0 = time.monotonic()
+        got = 0
+        w = h = 0
+        for _ in range(sample_frames):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            got += 1
+            h, w = frame.shape[:2]
+        elapsed = time.monotonic() - t0
+        if got == 0:
+            return {"ok": False, "error": "已連線但取不到畫面", "mode": src.mode,
+                    "device": src.device_label}
+        return {
+            "ok": True,
+            "mode": src.mode,
+            "device": src.device_label,
+            "width": w,
+            "height": h,
+            "fps": round(got / elapsed, 1) if elapsed > 0 else None,
+            "frames": got,
+            "gstreamer": has_gstreamer(),
+        }
+    finally:
+        cap.release()
+
+
 class VideoSource:
     """統一的影像來源介面：start() 後用 get_frame() 拿 (frame, t_mono)。"""
 
@@ -60,22 +220,21 @@ class VideoSource:
         mode = self.mode
         if mode == "rtsp":
             url = self.cfg.get("rtsp_url", "")
-            self.device_label = url
-            # OpenCV/FFMPEG 預設會緩衝數秒——對追蹤是致命的。
-            # 走 UDP、關 buffer、低延遲旗標；必須在建立 VideoCapture 前設好環境變數。
-            transport = self.cfg.get("rtsp_transport", "udp")
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                f"rtsp_transport;{transport}|fflags;nobuffer|flags;low_delay|max_delay;0|reorder_queue_size;0"
-            )
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            if not cap.isOpened():
-                cap.release()
-                return None
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 只留最新一幀
-            except Exception:
-                pass
-            return cap
+            backend = self.cfg.get("rtsp_backend", "auto")
+            configured = self.cfg.get("rtsp_transport", "udp")
+            # auto：先試低延遲的 UDP，不通再退 TCP（有些網路擋 UDP）
+            timeout_s = float(self.cfg.get("rtsp_timeout_s", 5.0))
+            order = ["udp", "tcp"] if configured == "auto" else [configured]
+            for transport in order:
+                cap, note = open_rtsp(url, transport, backend, timeout_s)
+                if cap is not None:
+                    ok, _ = cap.read()  # 真的能取到一幀才算通
+                    if ok:
+                        self.device_label = f"{url}  [{note}]"
+                        return cap
+                    cap.release()
+            self.error = f"RTSP 無法取得畫面：{url}"
+            return None
 
         if mode == "file":
             path = self.cfg.get("file_path", "")
@@ -141,9 +300,28 @@ class VideoSource:
     def _capture_loop(self) -> None:
         fps_t0 = time.monotonic()
         fps_n = 0
+        last_good = time.monotonic()
+        stall_timeout = float(self.cfg.get("stall_timeout_s", 4.0))
         while not self._stop.is_set():
             ok, frame = (self._cap.read() if self._cap else (False, None))
             now = time.monotonic()
+
+            # RTSP／網路來源可能「不報錯但也不再吐新幀」——read() 成功卻停更。
+            # 沒有 watchdog 的話追蹤會抱著一張舊畫面繼續算，非常危險。
+            if ok and frame is not None:
+                last_good = now
+            elif now - last_good > stall_timeout and self.mode in ("rtsp", "uvc", "obs"):
+                self.connected = False
+                self.error = f"影像停滯超過 {stall_timeout:.0f}s，重新連線中"
+                if self._cap:
+                    self._cap.release()
+                self._cap = self._open()
+                if self._cap is not None:
+                    self.connected = True
+                    self.error = None
+                    last_good = now
+                continue
+
             if not ok or frame is None:
                 if self.mode == "file" and self._cap is not None:
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 影片檔循環播放

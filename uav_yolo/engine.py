@@ -428,6 +428,9 @@ class TrackerEngine:
             landed=getattr(store, "landed", None),
         )
         self.gate_report_blocked = report.blocked
+        if report.throttled and not report.blocked:
+            # 中性說明，不進紅色阻擋清單
+            self.guidance_note = f"限速中（每秒最多 {1.0 / self.gates.min_interval_s:.0f} 筆），等下一個發送時槽"
         if cmd is None or not report.ok or self.georef is None:
             return
 

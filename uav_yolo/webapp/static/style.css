@@ -131,6 +131,8 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
   background: var(--red-soft); color: var(--red);
 }
 .gate-item.ok { background: var(--green-soft); color: var(--green); font-weight: 700; }
+/* 正常節流/節奏控制：中性色，別跟真正的安全阻擋（紅）混淆 */
+.gate-item.info { background: var(--sky-soft); color: var(--blue); font-weight: 400; }
 
 /* ---------- 資訊區 ---------- */
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: .95rem; }

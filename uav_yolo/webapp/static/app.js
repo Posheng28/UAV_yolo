@@ -75,9 +75,9 @@ function renderStatus(st) {
   // 閘門
   const gates = $("#gate-list");
   if (st.guidance_enabled && st.gates.length === 0) {
-    gates.innerHTML = st.guidance_note
-      ? `<div class="gate-item ok">✓ 閘門全通過｜${st.guidance_note}</div>`
-      : `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>`;
+    // 節流/deadband 是正常流量控制，用中性樣式；紅色 ✗ 只保留給真正的安全阻擋
+    gates.innerHTML = `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>` +
+      (st.guidance_note ? `<div class="gate-item info">⏱ ${st.guidance_note}</div>` : "");
   } else if (st.gates.length) {
     gates.innerHTML = st.gates.map((g) => `<div class="gate-item">✗ ${g}</div>`).join("");
   } else {

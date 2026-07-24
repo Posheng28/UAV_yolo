@@ -20,6 +20,10 @@ import numpy as np
 class GateReport:
     ok: bool
     blocked: list[str] = field(default_factory=list)
+    # 節流「不是安全阻擋」，是流量控制：每秒最多發一次指令，正常運作時
+    # 大半時間都成立。混進 blocked 會讓 UI 一直閃紅，操作員很快學會忽略
+    # 紅色項目——真的出現 GPS 不良/飛行員接管時就看不到了（警報疲勞）。
+    throttled: bool = False
 
 
 class SafetyGates:
@@ -144,7 +148,10 @@ class SafetyGates:
             dist_home = float(np.linalg.norm(np.asarray(cmd_point_ne, dtype=float)))
             if dist_home > self.max_cmd_distance_m:
                 blocked.append(f"指令點離 home {dist_home:.0f}m 超出圍欄 {self.max_cmd_distance_m:.0f}m")
-        if self._last_send_t is not None and (now - self._last_send_t) < self.min_interval_s:
-            blocked.append("速率限制（正常節流）")
+        throttled = (
+            self._last_send_t is not None
+            and (now - self._last_send_t) < self.min_interval_s
+        )
 
-        return GateReport(ok=not blocked, blocked=blocked)
+        # 節流一樣會擋住這次發送（ok=False），但不列入 blocked，UI 另外用中性樣式顯示
+        return GateReport(ok=(not blocked and not throttled), blocked=blocked, throttled=throttled)

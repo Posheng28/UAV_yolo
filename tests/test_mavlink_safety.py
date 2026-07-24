@@ -150,6 +150,29 @@ def test_rate_limit():
     assert gates.evaluate(1.1, **all_pass_kwargs()).ok
 
 
+def test_throttling_is_not_reported_as_a_safety_block():
+    """節流是流量控制，不能混進紅色阻擋清單——否則正常運作時一直閃紅，
+    操作員會學會忽略紅色，真的出事時（GPS/接管）就看不到了。"""
+    gates = make_gates()
+    gates.mark_sent(0.0)
+    report = gates.evaluate(0.3, **all_pass_kwargs())
+
+    assert report.throttled is True
+    assert report.ok is False          # 仍然不發送
+    assert report.blocked == []        # 但不是「安全阻擋」
+    assert not any("速率" in b for b in report.blocked)
+
+
+def test_real_blocks_still_listed_while_throttled():
+    gates = make_gates()
+    gates.mark_sent(0.0)
+    kwargs = all_pass_kwargs()
+    kwargs["armed"] = False
+    report = gates.evaluate(0.3, **kwargs)
+    assert report.throttled is True
+    assert any("arm" in b for b in report.blocked)  # 真阻擋照樣要顯示
+
+
 def test_gps_quality_gate_blocks():
     """對應 global_goto_node 的 GPS gate：direct 模式由地面把關。"""
     from uav_yolo.mavlink_io.telemetry import GpsSample

@@ -21,6 +21,10 @@
   （見 [`global_goto_multirotor_patch.md`](global_goto_multirotor_patch.md)）；
   或四軸先用 `direct` 後端驗證追蹤本身、整合路徑留給固定翼。
 
+> **但先看 §2 路線 C**：如果目的只是「讓 Pixhawk 收到我們算出的目標」，
+> **數傳直接插 Pixhawk 就夠了，完全不需要 companion**——上面 A、B 兩個問題都不存在。
+> 四軸首驗建議直接走這條。
+
 ---
 
 ## 1. 誰負責什麼（分工）
@@ -39,7 +43,43 @@
 
 ---
 
-## 2. 架構：兩條路，先講推薦的
+## 2. 架構：三條路
+
+### ⭐ 路線 C（最簡，四軸首驗推薦）：**根本不用 companion**
+
+數傳電台直接插 Pixhawk 6C Mini 的 TELEM1，UAV_yolo 用 **一條 MAVLink 幹完三件事**：
+
+```
+相機 ──FPV圖傳──→ 採集卡 ──→ ┐
+                              ├─ UAV_yolo(地面筆電)
+Pixhawk TELEM1 ─SiK數傳─←──→ ┘   ├ 讀 ATTITUDE/GLOBAL_POSITION_INT/GPS_RAW_INT → 測地＋閘門
+                                  ├ 送 DO_REPOSITION                        → 目標
+                                  └ 送 DO_SET_ROI_LOCATION                  → C-20T 雲台
+```
+
+`link.command_backend: direct`（預設值）。PX4 接受任何 GCS 來的 DO_REPOSITION，
+**不需要 RPi / Orin、不需要 ROS 2、不需要 uXRCE-DDS Agent、不需要 LR24 協定、
+也不需要多旋翼 patch**（那個固定翼 gate 在 NYCU 節點裡，這條路直接繞過）。
+而且 **DO_REPOSITION param3 可以帶 loiter 半徑**——LR24 的 GOTO 幀反而做不到。
+
+> **關鍵理解**：既然追蹤本來就跑在地面，companion 在這個架構裡**只是「轉送 + 安全把關」，
+> 並不提供任何自主能力**。所以四軸階段拿掉它是完全合理的簡化。
+
+**拿掉 companion 會少掉什麼？** `global_goto_node` 的機上 gate（GPS fix/衛星/eph/epv、
+failsafe_flags、land_detected、ACK+setpoint 雙重確認）。其中 **GPS 品質與離地判定已在
+UAV_yolo 補上**（`safety.require_gps_quality` / `require_airborne`，資料取自 MAVLink
+`GPS_RAW_INT` / `EXTENDED_SYS_STATE`，門檻與該節點一致：fix≥3、衛星≥8、eph≤5m、epv≤8m）。
+仍少的是 PX4 `failsafe_flags` 細項與 setpoint 雙重確認——這兩項由 **PX4 自身 failsafe
+與飛行員 RC 接管** 兜底。
+
+**什麼時候才真的需要 companion？**
+1. 想把追蹤搬到機上（路線 A）——免圖傳、超出影像鏈路距離也能追（需 Orin 級算力）。
+2. 想要那層機上 gate 獨立於地面鏈路強制執行。
+3. LR24-F（最大 500 mW）射程優於你手上的 SiK 電台時，拿它當指令上行。
+
+---
+
+## 2b. 需要 companion 時：兩條路，先講推薦的
 
 測地（把畫面像素換成 GPS）需要同時有 **影像的像素** 和 **當下的相機姿態
 （＝載具姿態 ⊗ 雲台姿態）**。兩者在哪，就決定架構長怎樣。

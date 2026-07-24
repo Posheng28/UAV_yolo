@@ -73,6 +73,14 @@ safety:
   min_cmd_alt_m: 20.0        # 指令高度下限（相對 home）
   max_cmd_alt_m: 120.0       # 指令高度上限（相對 home）
   max_meas_jump_m: 30.0      # 單幀測地跳變硬上限（KF gate 之外的最後防線）
+  # 以下對應機上 global_goto_node 的同名 gate；direct 模式（不經 companion）時
+  # 由地面端把關，資料來自 MAVLink GPS_RAW_INT / EXTENDED_SYS_STATE。
+  require_gps_quality: true
+  gps_min_fix_type: 3        # 3=3D fix
+  gps_min_satellites: 8
+  gps_max_eph_m: 5.0
+  gps_max_epv_m: 8.0
+  require_airborne: true     # 未離地不發導引指令（本系統不負責起飛）
 
 mavlink:
   port: COM3            # 遙測（姿態/位置/雲台）來源數傳電台 COM 埠
@@ -83,6 +91,8 @@ mavlink:
     ATTITUDE: 10
     GLOBAL_POSITION_INT: 5
     GIMBAL_DEVICE_ATTITUDE_STATUS: 5
+    GPS_RAW_INT: 2              # GPS 品質閘門用
+    EXTENDED_SYS_STATE: 1       # 離地判定用
 
 link:
   # 指令後端：決定「算出的目標 GPS」用什麼方式送出去

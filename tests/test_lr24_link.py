@@ -131,6 +131,7 @@ class FakeAirSide:
         self._lock = threading.Lock()
         self.received_frames = []
         self.ready = ready
+        self.force_err = False
 
     def write(self, data: bytes):
         with self._lock:
@@ -151,7 +152,10 @@ class FakeAirSide:
             "state=IDLE;ready_for_goto=%s" % ("true" if self.ready else "false") if verb == "STATUS"
             else "accepted"
         )
-        rp = f"ACK,{seq},{verb},{msg}"
+        rtype = "ERR" if (self.force_err and verb in ("GOTO", "GOTO_AMSL")) else "ACK"
+        if rtype == "ERR":
+            msg = "Vehicle is not armed; this node never arms the vehicle"
+        rp = f"{rtype},{seq},{verb},{msg}"
         self._tx.append(f"${rp}*{checksum(rp):02X}\n".encode("ascii"))
 
     def readline(self) -> bytes:
@@ -206,6 +210,36 @@ def test_channel_coalesces_to_latest_target():
         # 送出的 GOTO 數應遠少於 5（coalescing）；最後收到的目標為最新那筆附近
         gotos = [f for f in air.received_frames if f[0] == "GOTO"]
         assert len(gotos) <= 5
+    finally:
+        ch.stop()
+
+
+def test_channel_retries_goto_after_err():
+    """一次 ERR 不能讓靜止目標永遠收不到指令（引擎有 deadband 不會重呼叫）。"""
+    air = FakeAirSide()
+    air.force_err = True  # 前幾筆一律拒絕
+    ch = Lr24CommandChannel(transport=air, status_interval_s=999, retry_backoff_s=0.05)
+    ch.start()
+    try:
+        ch.goto(24.5, 120.8, 50.0)
+        assert _wait(lambda: sum(1 for f in air.received_frames if f[0] == "GOTO") >= 2, timeout=3.0), \
+            "被 ERR 後沒有重試"
+        assert ch.retry_count >= 1
+        air.force_err = False  # 機上就緒後應成功
+        assert _wait(lambda: ch.ack_count >= 1, timeout=3.0)
+    finally:
+        ch.stop()
+
+
+def test_channel_drops_stale_goto():
+    """目標太舊（早已丟失）就不該再送出去。"""
+    air = FakeAirSide()
+    ch = Lr24CommandChannel(transport=air, status_interval_s=999, goto_max_age_s=0.0)
+    ch.start()
+    try:
+        ch.goto(24.5, 120.8, 50.0)
+        assert _wait(lambda: ch.dropped_stale >= 1)
+        assert not any(f[0] == "GOTO" for f in air.received_frames)
     finally:
         ch.stop()
 

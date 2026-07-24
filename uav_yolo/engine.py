@@ -346,6 +346,8 @@ class TrackerEngine:
             est_age_s=self.estimator.time_since_update(now if self._last_frame_t is None else self._last_frame_t),
             coast_timeout_s=self.coast_timeout_s,
             cmd_point_ne=cmd.point_ne if cmd else None,
+            gps=getattr(store, "gps", None),
+            landed=getattr(store, "landed", None),
         )
         self.gate_report_blocked = report.blocked
         if cmd is None or not report.ok or self.georef is None:

@@ -101,6 +101,8 @@ class Lr24CommandChannel:
         alt_ref: str = "rel_home",
         response_timeout_s: float = 8.0,
         status_interval_s: float = 3.0,
+        retry_backoff_s: float = 1.0,
+        goto_max_age_s: float = 10.0,
         transport=None,
         seq_start: int | None = None,
     ):
@@ -109,11 +111,16 @@ class Lr24CommandChannel:
         self.alt_ref = alt_ref  # rel_home -> GOTO | amsl -> GOTO_AMSL
         self.response_timeout_s = response_timeout_s
         self.status_interval_s = status_interval_s
+        self.retry_backoff_s = retry_backoff_s
+        self.goto_max_age_s = goto_max_age_s
 
         self._transport = transport  # 可注入（測試）；None 則 start() 開 pyserial
         self._seq = seq_start if seq_start is not None else self._time_seq()
         self._lock = threading.Lock()
-        self._pending_goto: tuple[float, float, float, str] | None = None
+        # (lat, lon, alt, ref, enqueued_at)
+        self._pending_goto: tuple[float, float, float, str, float] | None = None
+        self.retry_count = 0
+        self.dropped_stale = 0
         self._emergency: str | None = None  # "RTL" / "ABORT"
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -143,7 +150,9 @@ class Lr24CommandChannel:
     def goto(self, lat: float, lon: float, alt_m: float, ref: str | None = None) -> None:
         """設定/更新最新目標（coalescing：只保留最後一筆）。"""
         with self._lock:
-            self._pending_goto = (float(lat), float(lon), float(alt_m), ref or self.alt_ref)
+            self._pending_goto = (
+                float(lat), float(lon), float(alt_m), ref or self.alt_ref, time.monotonic()
+            )
 
     def request_rtl(self) -> None:
         with self._lock:
@@ -191,10 +200,22 @@ class Lr24CommandChannel:
             if emergency == "RTL":
                 self._send_and_wait("RTL")
             elif goto is not None:
-                lat, lon, alt, ref = goto
+                lat, lon, alt, ref, queued_at = goto
+                if time.monotonic() - queued_at > self.goto_max_age_s:
+                    self.dropped_stale += 1  # 太舊（目標早已丟失）就別再送
+                    continue
                 verb = "GOTO_AMSL" if ref == "amsl" else "GOTO"
                 # node 要求 lat/lon 全精度、alt 一位小數即可
-                self._send_and_wait(verb, f"{lat:.7f}", f"{lon:.7f}", f"{alt:.1f}")
+                resp = self._send_and_wait(verb, f"{lat:.7f}", f"{lon:.7f}", f"{alt:.1f}")
+                if resp is None or resp.frame_type == "ERR":
+                    # 逾時或被拒（busy / 尚未 ready / GPS gate）→ 重排重試。
+                    # 引擎有 deadband，目標不動就不會再呼叫 send_reposition，
+                    # 這裡不重試的話「一次 ERR 就再也不送」，靜止目標將永遠收不到指令。
+                    with self._lock:
+                        if self._pending_goto is None:  # 沒有更新的目標才重排
+                            self._pending_goto = goto
+                            self.retry_count += 1
+                    time.sleep(self.retry_backoff_s)
             elif time.monotonic() - last_status >= self.status_interval_s:
                 self._send_and_wait("STATUS")
                 last_status = time.monotonic()

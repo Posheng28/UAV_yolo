@@ -21,6 +21,8 @@ from .px4_modes import mode_string
 # MAVLink 訊息 id（SET_MESSAGE_INTERVAL 用）
 MSG_ID_ATTITUDE = 30
 MSG_ID_GLOBAL_POSITION_INT = 33
+MSG_ID_GPS_RAW_INT = 24
+MSG_ID_EXTENDED_SYS_STATE = 245
 MSG_ID_HOME_POSITION = 242
 MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS = 285
 
@@ -60,6 +62,27 @@ class Heartbeat:
     t: float
     mode: str
     armed: bool
+
+
+@dataclass
+class GpsSample:
+    """GPS_RAW_INT 品質（對應 global_goto_node 的 GPS gate）。"""
+    t: float
+    fix_type: int
+    satellites: int
+    eph_m: float
+    epv_m: float
+
+
+@dataclass
+class LandedSample:
+    """EXTENDED_SYS_STATE.landed_state：1=ON_GROUND 2=IN_AIR 3=TAKEOFF 4=LANDING。"""
+    t: float
+    landed_state: int
+
+    @property
+    def airborne(self) -> bool:
+        return self.landed_state in (2, 3, 4)
 
 
 @dataclass
@@ -112,6 +135,8 @@ class TelemetryStore:
         self._gimbal: deque[GimbalSample] = deque()
         self.heartbeat: Heartbeat | None = None
         self.home: Home | None = None
+        self.gps: GpsSample | None = None
+        self.landed: LandedSample | None = None
         self.last_msg_t: float | None = None
 
     def _trim(self, buf: deque, now: float) -> None:
@@ -147,6 +172,16 @@ class TelemetryStore:
         with self._lock:
             if self.home is None:
                 self.home = home
+
+    def set_gps(self, gps: GpsSample) -> None:
+        with self._lock:
+            self.gps = gps
+            self.last_msg_t = gps.t
+
+    def set_landed(self, landed: LandedSample) -> None:
+        with self._lock:
+            self.landed = landed
+            self.last_msg_t = landed.t
 
     # ---- 查詢 ----
 
@@ -273,6 +308,17 @@ class MavlinkConnection:
                 yaw_is_earth = bool(msg.flags & GIMBAL_DEVICE_FLAGS_YAW_LOCK)
                 self.store.push_gimbal(GimbalSample(now, roll, pitch, yaw, yaw_is_earth))
 
+            elif mtype == "GPS_RAW_INT":
+                # eph/epv 以 cm 傳送；UINT16_MAX 表示未知
+                eph = float("inf") if msg.eph in (0, 65535) else msg.eph / 100.0
+                epv = float("inf") if msg.epv in (0, 65535) else msg.epv / 100.0
+                self.store.set_gps(
+                    GpsSample(now, int(msg.fix_type), int(msg.satellites_visible), eph, epv)
+                )
+
+            elif mtype == "EXTENDED_SYS_STATE":
+                self.store.set_landed(LandedSample(now, int(msg.landed_state)))
+
             elif mtype == "COMMAND_ACK":
                 self.last_ack[msg.command] = (msg.result, now)
 
@@ -282,6 +328,8 @@ class MavlinkConnection:
             "ATTITUDE": MSG_ID_ATTITUDE,
             "GLOBAL_POSITION_INT": MSG_ID_GLOBAL_POSITION_INT,
             "GIMBAL_DEVICE_ATTITUDE_STATUS": MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS,
+            "GPS_RAW_INT": MSG_ID_GPS_RAW_INT,
+            "EXTENDED_SYS_STATE": MSG_ID_EXTENDED_SYS_STATE,
         }
         for name, hz in self.stream_rates.items():
             msg_id = name_to_id.get(name)

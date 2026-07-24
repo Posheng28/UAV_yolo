@@ -73,6 +73,8 @@ def make_gates():
 
 
 def all_pass_kwargs():
+    from uav_yolo.mavlink_io.telemetry import GpsSample, LandedSample
+
     return dict(
         guidance_enabled=True,
         mode="AUTO.LOITER",
@@ -82,6 +84,8 @@ def all_pass_kwargs():
         est_age_s=0.1,
         coast_timeout_s=8.0,
         cmd_point_ne=np.array([100.0, 50.0]),
+        gps=GpsSample(0.0, fix_type=3, satellites=12, eph_m=1.0, epv_m=1.5),
+        landed=LandedSample(0.0, landed_state=2),
     )
 
 
@@ -144,6 +148,55 @@ def test_rate_limit():
     gates.mark_sent(0.0)
     assert not gates.evaluate(0.5, **all_pass_kwargs()).ok  # 1Hz 內
     assert gates.evaluate(1.1, **all_pass_kwargs()).ok
+
+
+def test_gps_quality_gate_blocks():
+    """對應 global_goto_node 的 GPS gate：direct 模式由地面把關。"""
+    from uav_yolo.mavlink_io.telemetry import GpsSample
+
+    gates = make_gates()
+    for bad, needle in [
+        (GpsSample(0.0, fix_type=2, satellites=12, eph_m=1.0, epv_m=1.0), "fix_type"),
+        (GpsSample(0.0, fix_type=3, satellites=5, eph_m=1.0, epv_m=1.0), "衛星"),
+        (GpsSample(0.0, fix_type=3, satellites=12, eph_m=9.0, epv_m=1.0), "水平誤差"),
+        (GpsSample(0.0, fix_type=3, satellites=12, eph_m=1.0, epv_m=20.0), "垂直誤差"),
+    ]:
+        kwargs = all_pass_kwargs()
+        kwargs["gps"] = bad
+        report = gates.evaluate(0.0, **kwargs)
+        assert not report.ok
+        assert any(needle in b for b in report.blocked), f"{needle} 未被擋下"
+
+
+def test_missing_gps_or_landed_blocks():
+    gates = make_gates()
+    kwargs = all_pass_kwargs()
+    kwargs["gps"] = None
+    assert not gates.evaluate(0.0, **kwargs).ok
+
+    kwargs = all_pass_kwargs()
+    kwargs["landed"] = None
+    assert not gates.evaluate(0.0, **kwargs).ok
+
+
+def test_not_airborne_blocks():
+    from uav_yolo.mavlink_io.telemetry import LandedSample
+
+    gates = make_gates()
+    kwargs = all_pass_kwargs()
+    kwargs["landed"] = LandedSample(0.0, landed_state=1)  # ON_GROUND
+    report = gates.evaluate(0.0, **kwargs)
+    assert not report.ok
+    assert any("離地" in b for b in report.blocked)
+
+
+def test_gps_gates_can_be_disabled():
+    cfg = {"allowed_modes": ["AUTO.LOITER"], "require_gps_quality": False, "require_airborne": False}
+    gates = SafetyGates(cfg, rate_hz=1.0)
+    kwargs = all_pass_kwargs()
+    kwargs["gps"] = None
+    kwargs["landed"] = None
+    assert gates.evaluate(0.0, **kwargs).ok
 
 
 def test_alt_clamp():

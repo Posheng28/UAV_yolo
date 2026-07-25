@@ -70,8 +70,7 @@ class WorldAirSide:
 
 @pytest.fixture
 def lr24_engine(tmp_path):
-    cfg = Config()
-    cfg._local_path = tmp_path / "local.yaml"
+    cfg = Config(local_path=tmp_path / "local.yaml")
     cfg.update(
         {
             "system": {"mode": "sim"},

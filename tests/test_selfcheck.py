@@ -13,8 +13,7 @@ DT = 0.05
 
 
 def make_engine(tmp_path, **over):
-    cfg = Config()
-    cfg._local_path = tmp_path / "local.yaml"
+    cfg = Config(local_path=tmp_path / "local.yaml")
     patch = {"system": {"mode": "sim"}, "video": {"width": 640, "height": 360},
              "sim": {"patrol": False}}
     patch.update(over)
@@ -122,8 +121,7 @@ def test_selfcheck_never_sends_commands(tmp_path):
 
 
 def test_selfcheck_endpoint(tmp_path):
-    cfg = Config()
-    cfg._local_path = tmp_path / "local.yaml"
+    cfg = Config(local_path=tmp_path / "local.yaml")
     cfg.update({"system": {"mode": "sim"}, "video": {"width": 640, "height": 360}})
     app = create_app(cfg)
     with TestClient(app) as client:

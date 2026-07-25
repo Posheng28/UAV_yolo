@@ -45,9 +45,17 @@ def check_video(engine) -> CheckResult:
 
     frame, t1 = v.get_frame()
     if frame is None:
+        label = getattr(v, "device_label", "") or "尚未成功開啟任何裝置"
+        err = getattr(v, "error", None)
+        cfgv = getattr(v, "cfg", {}) or {}
+        hint = (f"來源={cfgv.get('source')}"
+                f"｜名稱關鍵字='{cfgv.get('uvc_name_hint', '')}'"
+                f"｜索引={cfgv.get('uvc_index')}")
         return _r("video", "影像鏈路", "fail",
-                  f"沒有畫面（來源：{getattr(v, 'device_label', '?')}）",
-                  "設定頁按「🎥 測試影像來源」；確認採集卡沒被 OBS 等程式佔用")
+                  f"沒有畫面（{label}）｜{hint}" + (f"｜{err}" if err else ""),
+                  "設定頁按「🎥 測試影像來源」比對：若測試能開但這裡不行，"
+                  "多半是裝置被別的程式佔用（OBS／另一個地面站分頁），"
+                  "或索引指到別台裝置；系統會持續自動重試")
 
     h, w = frame.shape[:2]
     fps = round(float(getattr(v, "fps", 0.0)), 1)

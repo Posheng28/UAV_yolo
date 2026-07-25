@@ -506,7 +506,12 @@ $("#cfg-testvideo").addEventListener("click", async () => {
     box.innerHTML =
       `<b>✓ 影像來源正常</b>（${res.mode}）<br>` +
       `來源：${res.device || "—"}<br>` +
-      `實際解析度：<b>${res.width}×${res.height}</b>｜擷取速率：約 ${res.fps ?? "—"} FPS<br>` +
+      `實際解析度：<b>${res.width}×${res.height}</b>｜擷取速率：約 ${res.fps ?? "—"} FPS` +
+      (res.fourcc ? `｜格式 ${res.fourcc}` : "") + "<br>" +
+      (res.fps !== null && res.fps < 15
+        ? `<span style="color:#b5493f">⚠ FPS 偏低：若格式不是 MJPG → USB2 頻寬不足；` +
+          `若格式已是 MJPG → 多半是<b>採集卡沒收到 HDMI 訊號</b>（圖傳未供電/未鎖定）</span><br>`
+        : "") +
       `<span class="mut">校正請用這個實際解析度重做；GStreamer：${res.gstreamer ? "可用（RTSP 延遲更低）" : "未編入（用 FFMPEG）"}</span>`;
   } else {
     box.innerHTML = `<b>✗ 測試失敗</b>（${res.mode}）<br>${res.error || "未知錯誤"}`;

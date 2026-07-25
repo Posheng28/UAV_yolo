@@ -255,6 +255,16 @@ class TrackerEngine:
     def step(self) -> bool:
         frame, frame_t = self.video.get_frame()
         if frame is None or frame_t == self._last_frame_t:
+            # 沒有新影像時仍要發布狀態（限流 2Hz）：否則影像一斷，儀表板的
+            # 數傳/GPS/Home 全部停在舊值或空白，看起來像「什麼都斷了」，
+            # 會把排查方向整個帶偏——實際上遙測可能好好的。
+            now_wall = time.monotonic()
+            if now_wall - getattr(self, "_last_idle_publish", 0.0) >= 0.5:
+                self._last_idle_publish = now_wall
+                try:
+                    self._publish_status(self.clock(), [], None)
+                except Exception:
+                    pass
             return False
         self._last_frame_t = frame_t
         now = self.clock()

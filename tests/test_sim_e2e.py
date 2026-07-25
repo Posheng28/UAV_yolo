@@ -18,9 +18,8 @@ DT = 0.05
 
 
 def make_cfg(tmp_path, airframe: str) -> Config:
-    cfg = Config()
-    # 測試用 local.yaml 寫到 tmp，避免弄髒真的設定
-    cfg._local_path = tmp_path / "local.yaml"
+    # local.yaml 指到 tmp：既不弄髒真設定，也不會被使用者的實機設定污染測試
+    cfg = Config(local_path=tmp_path / "local.yaml")
     cfg.update(
         {
             "system": {"mode": "sim"},

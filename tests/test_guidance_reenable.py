@@ -14,8 +14,7 @@ DT = 0.05
 
 
 def make_engine(tmp_path, airframe="multirotor"):
-    cfg = Config()
-    cfg._local_path = tmp_path / "local.yaml"
+    cfg = Config(local_path=tmp_path / "local.yaml")
     cfg.update({
         "system": {"mode": "sim"},
         "vehicle": {"airframe": airframe},

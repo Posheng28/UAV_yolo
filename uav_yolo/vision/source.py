@@ -17,13 +17,38 @@ import cv2
 
 
 def list_video_devices() -> list[str]:
-    """Windows DirectShow 裝置清單（UI 下拉選單用）。"""
+    """Windows DirectShow 裝置清單（UI 下拉選單用）。
+
+    pygrabber 走 COM，而 FastAPI 的同步端點跑在執行緒池——每條新執行緒都必須
+    先 CoInitialize，否則會靜默失敗回空清單（症狀：設定頁「裝置清單」顯示
+    偵測不到，但同一時間「測試影像來源」卻抓得到裝置名稱）。
+    """
+    initialized = False
+    try:
+        import comtypes  # pygrabber 的相依
+
+        try:
+            comtypes.CoInitialize()
+            initialized = True
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     try:
         from pygrabber.dshow_graph import FilterGraph
 
         return FilterGraph().get_input_devices()
     except Exception:
         return []
+    finally:
+        if initialized:
+            try:
+                import comtypes
+
+                comtypes.CoUninitialize()
+            except Exception:
+                pass
 
 
 def _find_device_index(name_hint: str) -> int | None:
@@ -181,6 +206,7 @@ def probe_source(cfg_video: dict, sample_frames: int = 12) -> dict:
         if got == 0:
             return {"ok": False, "error": "已連線但取不到畫面", "mode": src.mode,
                     "device": src.device_label}
+
         return {
             "ok": True,
             "mode": src.mode,
@@ -189,6 +215,9 @@ def probe_source(cfg_video: dict, sample_frames: int = 12) -> dict:
             "height": h,
             "fps": round(got / elapsed, 1) if elapsed > 0 else None,
             "frames": got,
+            # 實際談成的格式：FPS 偏低時用來分辨「沒談成 MJPG」還是「沒有 HDMI 訊號」
+            "fourcc": VideoSource.read_fourcc(cap),
+            "note": src.error or "",
             "gstreamer": has_gstreamer(),
         }
     finally:
@@ -257,15 +286,7 @@ class VideoSource:
             if not cap.isOpened():
                 cap.release()
                 continue
-            # 便宜的 HDMI 採集卡多半是 USB2：用預設的 YUY2 未壓縮格式在 1080p
-            # 會被頻寬卡到剩幾 fps。改要 MJPG 才吃得下 1080p30。
-            fourcc = str(self.cfg.get("fourcc", "MJPG")).strip().upper()
-            if len(fourcc) == 4:  # VideoWriter_fourcc 需要「剛好」4 字元，少一個就 TypeError
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-            elif fourcc:
-                self.error = f"fourcc 設定「{fourcc}」無效（需 4 字元，如 MJPG），已用裝置預設"
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self._negotiate_format(cap)
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 只留最新一幀，別累積延遲
             except Exception:
@@ -278,18 +299,71 @@ class VideoSource:
             cap.release()
         return None
 
+    @staticmethod
+    def read_fourcc(cap) -> str:
+        try:
+            code = int(cap.get(cv2.CAP_PROP_FOURCC))
+        except Exception:
+            return ""
+        if not code:
+            return ""
+        return "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4)).strip()
+
+    def _negotiate_format(self, cap) -> None:
+        """談定像素格式與解析度，**設定後讀回驗證**。
+
+        便宜的 HDMI 採集卡多半走 USB2：未壓縮 YUY2 在 1920×1080 只有約 5 FPS
+        （頻寬硬限制），必須談成 MJPG 才吃得下 30 FPS。但 DirectShow 驅動常常
+        「接受了 set() 卻不套用」，而且對『先設格式還是先設解析度』的順序敏感——
+        實測某採集卡在預設順序下仍停在 YUY2。因此這裡設完要讀回確認，
+        沒成功就換順序再試一次。
+        """
+        want = str(self.cfg.get("fourcc", "MJPG")).strip().upper()
+        if want and len(want) != 4:
+            self.error = f"fourcc 設定「{want}」無效（需 4 字元，如 MJPG），改用裝置預設"
+            want = ""
+
+        def apply(fourcc_first: bool) -> None:
+            if fourcc_first and want:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*want))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            if not fourcc_first and want:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*want))
+
+        apply(fourcc_first=True)
+        if not want:
+            return
+        if self.read_fourcc(cap).upper() == want:
+            return
+
+        # 沒談成：換「先解析度後格式」再試（部分驅動只吃這個順序）
+        apply(fourcc_first=False)
+        got = self.read_fourcc(cap).upper()
+        if got != want:
+            self.error = (
+                f"要求 {want} 但裝置談成 {got or '未知'}；"
+                f"{self.width}×{self.height} 走未壓縮格式在 USB2 只有約 5 FPS。"
+                "可改用 USB3 採集卡，或把解析度降到 1280×720"
+            )
+
     # ---- 生命週期 ----
 
     def start(self) -> bool:
+        """啟動擷取。**即使一開始開不了也會啟動重連執行緒**。
+
+        以前開啟失敗就直接 return False 且不啟動執行緒 → 引擎永久失明、
+        不會自己恢復（例如重啟引擎時前一個 capture 尚未釋放裝置、或圖傳
+        還沒供電）。這種暫時性失敗必須能自動康復。
+        """
         self._cap = self._open()
+        self.connected = self._cap is not None
         if self._cap is None:
-            self.error = f"無法開啟影像來源（{self.mode}）"
-            return False
-        self.connected = True
+            self.error = f"無法開啟影像來源（{self.mode}），持續重試中"
         self._stop.clear()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="video-capture")
         self._thread.start()
-        return True
+        return self.connected
 
     def stop(self) -> None:
         self._stop.set()

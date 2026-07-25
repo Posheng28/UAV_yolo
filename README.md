@@ -37,6 +37,10 @@ Windows 免打指令：雙擊 **`start.bat`**（模擬）或 **`start-live.bat`*
 > Stage 0 sim → 1 SITL 直連 → 2 SITL 經 LR24 整合 → 3 拆槳桌面 → 4 低風險實飛，
 > 以及四軸用的 [`integration/global_goto_multirotor_patch.md`](integration/global_goto_multirotor_patch.md)。
 >
+> **四軸首飛照這份走**：[`integration/QUAD_FIRST_FLIGHT.md`](integration/QUAD_FIRST_FLIGHT.md) —
+> 逐條鏈路的驗證步驟與判定標準（桌面 → 拆槳通電 → 低風險實飛）。
+> UI 的「任務檢查 → 🔗 鏈路自檢」會實測所有鏈路是否真的通。
+>
 > **上場前快速對照**：[`integration/PATH_MATRIX.md`](integration/PATH_MATRIX.md) —
 > 每條路徑（指令後端×影像×雲台×載體）的準備清單、驗證到什麼程度、
 > 哪些只能實機確認。影像鏈路細節另見

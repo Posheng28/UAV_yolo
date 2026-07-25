@@ -170,6 +170,28 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .mut { color: var(--mut); }
 .small { font-size: .85rem; }
 
+/* ---------- 鏈路自檢 ---------- */
+.sc-verdict {
+  margin: 12px 0 8px; padding: 10px 14px; border-radius: 10px;
+  font-weight: 800; font-size: 1rem;
+}
+.sc-verdict.sc-pass { background: var(--green-soft); color: var(--green); }
+.sc-verdict.sc-warn { background: #fdf1dc; color: #b07818; }
+.sc-verdict.sc-fail { background: var(--red-soft); color: var(--red); }
+.sc-item {
+  display: flex; gap: 10px; padding: 9px 12px; margin-bottom: 5px;
+  border-radius: 9px; background: #f8f4ec; border-left: 4px solid transparent;
+}
+.sc-item.sc-pass { border-left-color: var(--green); }
+.sc-item.sc-warn { border-left-color: #d9a441; background: #fdf7ea; }
+.sc-item.sc-fail { border-left-color: var(--red); background: var(--red-soft); }
+.sc-item.sc-skip { opacity: .6; }
+.sc-icon { font-size: 1.05rem; flex: none; }
+.sc-body { flex: 1; }
+.sc-name { font-weight: 700; font-size: .95rem; }
+.sc-detail { font-size: .9rem; color: var(--ink); margin-top: 2px; }
+.sc-fix { font-size: .85rem; color: var(--amber-deep); margin-top: 4px; font-weight: 600; }
+
 /* ---------- 檢查清單 ---------- */
 .cl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; margin-bottom: 14px; }
 .cl-progress { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 220px; }

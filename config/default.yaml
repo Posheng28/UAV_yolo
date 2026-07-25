@@ -5,9 +5,9 @@
 # =============================================================
 
 system:
-  mode: live            # live=實機 | sim=模擬（無硬體全鏈路驗證）
+  mode: sim             # sim=模擬（無硬體，安全預設）| live=實機。用 UI 設定頁切換＋重啟引擎
   web_host: 127.0.0.1
-  web_port: 8600
+  web_port: 8610
 
 vehicle:
   airframe: multirotor  # multirotor=旋翼機 | fixedwing=固定翼

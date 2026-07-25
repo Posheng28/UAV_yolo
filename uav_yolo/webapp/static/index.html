@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UAV_yolo 地面站</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
 <header>
@@ -84,6 +84,16 @@
 
 <!-- ================= 任務檢查清單 ================= -->
 <section id="view-checklist" class="view">
+  <div class="card narrow" style="margin-bottom:14px">
+    <div class="cl-head">
+      <h2>🔗 鏈路自檢</h2>
+      <button id="run-selfcheck" class="big-btn save" style="width:auto;min-width:180px">執行自檢</button>
+    </div>
+    <div class="mut small">實測每條鏈路是否真的通（讀真實遙測與影像，不會發送任何指令）。起飛前務必全綠。</div>
+    <div id="selfcheck-verdict" hidden></div>
+    <div id="selfcheck-list"></div>
+  </div>
+
   <div class="card narrow">
     <div class="cl-head">
       <h2>任務前檢查清單</h2>
@@ -235,6 +245,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>

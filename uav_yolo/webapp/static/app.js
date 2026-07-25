@@ -241,6 +241,50 @@ $("#btn-guidance").addEventListener("click", async () => {
 });
 $("#btn-unlock").addEventListener("click", () => post("/api/unlock"));
 
+/* ---------------- 鏈路自檢 ---------------- */
+const SC_ICON = { pass: "✅", warn: "⚠️", fail: "❌", skip: "➖" };
+$("#run-selfcheck").addEventListener("click", async () => {
+  const btn = $("#run-selfcheck");
+  const list = $("#selfcheck-list");
+  const verdict = $("#selfcheck-verdict");
+  btn.disabled = true;
+  btn.textContent = "檢測中…";
+  list.innerHTML = `<div class="mut small" style="padding:10px 0">正在實測各條鏈路…</div>`;
+  verdict.hidden = true;
+
+  let res;
+  try {
+    res = await post("/api/selfcheck");
+  } catch (e) {
+    res = { verdict: "fail", summary: "無法連線到伺服器", checks: [] };
+  }
+  btn.disabled = false;
+  btn.textContent = "重新自檢";
+
+  verdict.hidden = false;
+  verdict.className = "sc-verdict sc-" + res.verdict;
+  const c = res.counts || {};
+  verdict.textContent =
+    `${SC_ICON[res.verdict] || ""} ${res.summary}` +
+    (res.counts ? `（通過 ${c.pass || 0}｜提醒 ${c.warn || 0}｜不通 ${c.fail || 0}）` : "") +
+    (res.sim ? "　※ 目前為模擬模式" : "");
+
+  list.innerHTML = (res.checks || [])
+    .map(
+      (k) => `
+      <div class="sc-item sc-${k.status}">
+        <span class="sc-icon">${SC_ICON[k.status] || "•"}</span>
+        <div class="sc-body">
+          <div class="sc-name">${k.name}</div>
+          <div class="sc-detail">${k.detail}</div>
+          ${k.fix && k.status !== "pass" && k.status !== "skip"
+            ? `<div class="sc-fix">→ ${k.fix}</div>` : ""}
+        </div>
+      </div>`
+    )
+    .join("");
+});
+
 /* ---------------- 檢查清單 ---------------- */
 async function loadChecklist() {
   const data = await api("/api/checklist");

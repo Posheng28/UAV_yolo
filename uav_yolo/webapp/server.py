@@ -195,6 +195,18 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         video_cfg.update(body or {})  # 允許帶入尚未儲存的設定先試
         return probe_source(video_cfg)
 
+    # ---------------- 鏈路自檢 ----------------
+
+    @app.post("/api/selfcheck")
+    def selfcheck():
+        """實測每條鏈路是否通。只讀不寫，不會發送任何導引指令。"""
+        from ..selfcheck import run_selfcheck
+
+        engine = manager.engine
+        if engine is None:
+            return JSONResponse({"error": "引擎未就緒"}, status_code=503)
+        return run_selfcheck(engine, cfg)
+
     # ---------------- 檢查清單 ----------------
 
     @app.get("/api/checklist")
@@ -296,6 +308,21 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "last_found": sess.last_found,
             "has_result": sess.result is not None,
         }
+
+    @app.middleware("http")
+    async def no_cache_ui(request, call_next):
+        """UI 資產一律不快取。
+
+        地面站是本機服務、檔案很小，快取沒有效益，卻會造成很危險的情況：
+        更新後瀏覽器仍載入舊的 app.js/index.html，操作員看到的是舊版介面
+        （例如新加的安全檢查按鈕不見了、或行為與程式碼不符）卻毫無察覺。
+        """
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/static") or path == "/":
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app

@@ -29,6 +29,9 @@ python run.py --sim
 python run.py
 ```
 
+Windows 免打指令：雙擊 **`start.bat`**（模擬）或 **`start-live.bat`**（實機），
+會自動開伺服器＋彈瀏覽器。詳見 [`start_guide.md`](start_guide.md)。
+
 > **要與機上 NYCU_UAV_offboard（RPi/Orin 做 offboard）整合、或想看實體驗證流程？**
 > 讀 [`integration/INTEGRATION.md`](integration/INTEGRATION.md)：架構、接點對照、
 > Stage 0 sim → 1 SITL 直連 → 2 SITL 經 LR24 整合 → 3 拆槳桌面 → 4 低風險實飛，

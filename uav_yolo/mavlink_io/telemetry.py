@@ -252,7 +252,8 @@ class MavlinkConnection:
 
     # ---- 生命週期 ----
 
-    def start(self) -> bool:
+    def _try_open(self) -> bool:
+        """嘗試開埠。成功回 True。失敗設 error 回 False（不丟例外）。"""
         from pymavlink import mavutil  # 延遲載入：無硬體的測試不需要
 
         try:
@@ -260,13 +261,25 @@ class MavlinkConnection:
                 self.port, baud=self.baud,
                 source_system=self.source_system, source_component=190,
             )
-        except Exception as exc:  # 埠不存在/被占用
-            self.error = f"MAVLink 連線失敗: {exc}"
+            return True
+        except Exception as exc:  # 埠不存在/被占用（接 QGC、拔插電台時常見）
+            self._conn = None
+            self.error = f"開啟 {self.port} 失敗（{exc}）；埠一回來會自動重連"
             return False
+
+    def start(self) -> bool:
+        """啟動接收。**即使一開始開不了埠也會啟動執行緒持續重試**。
+
+        以前開埠失敗就 return False 且不啟動執行緒 → 埠一旦在啟動當下不在
+        （接 QGC、拔插電台、重新列舉），數傳就永久死掉，要手動「重啟引擎」。
+        現在改成背景執行緒持續重試，埠回來就自動接上。
+        """
         self._stop.clear()
+        opened = self._try_open()
+        self._intervals_requested = False
         self._thread = threading.Thread(target=self._recv_loop, daemon=True, name="mavlink-recv")
         self._thread.start()
-        return True
+        return opened
 
     def stop(self) -> None:
         self._stop.set()
@@ -284,11 +297,22 @@ class MavlinkConnection:
         from pymavlink import mavutil
 
         while not self._stop.is_set():
+            if self._conn is None:
+                # 尚未開埠或斷線：每 1.5 秒重試，埠回來就接上（不用手動重啟引擎）
+                if self._stop.wait(1.5):
+                    break
+                self._try_open()
+                continue
             try:
                 msg = self._conn.recv_match(blocking=True, timeout=0.2)
             except Exception as exc:
-                self.error = f"MAVLink 接收異常：{exc}"  # 別靜默吞掉，UI 要看得到
-                time.sleep(0.1)
+                # 讀取拋例外通常是埠被拔掉/斷線 → 關掉重來，交給上面重連
+                self.error = f"MAVLink 接收中斷（{exc}）；重連中"
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
                 continue
             # 原始位元組總量（pymavlink 累計）：即使解不出任何封包也會增加，
             # 用來判斷「有沒有東西進來」——鮑率不合時 bytes 漲、封包=0。

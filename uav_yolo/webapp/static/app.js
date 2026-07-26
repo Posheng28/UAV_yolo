@@ -392,21 +392,52 @@ const FIELDS = [
   { path: "safety.max_cmd_distance_m", label: "距 Home 圍欄 m", type: "number" },
   { path: "safety.min_cmd_alt_m", label: "指令高度下限 m", type: "number" },
   { path: "safety.max_cmd_alt_m", label: "指令高度上限 m", type: "number" },
-  { sec: "MAVLink 數傳（讀 pose）" },
-  { path: "mavlink.port", label: "COM 埠", type: "text", hint: "姿態/位置/雲台來源；例 COM3 ⟳" },
-  { path: "mavlink.baud", label: "鮑率", type: "number", hint: "SiK 電台常見 57600 ⟳" },
-  { sec: "指令後端（整合 NYCU offboard）" },
-  { path: "link.command_backend", label: "目標送出方式", type: "select",
-    options: [["direct", "直接 MAVLink DO_REPOSITION（四軸首驗）"], ["lr24", "LR24 → 機上 global_goto_node（整合）"]],
-    hint: "direct=上面那條數傳直接發給 PX4；lr24=經 LR24-F 交給機上 companion 套安全 gate ⟳" },
-  { path: "link.lr24_port", label: "LR24 COM 埠", type: "text", hint: "lr24 模式用；與上面遙測數傳不同一條 ⟳" },
-  { path: "link.lr24_baud", label: "LR24 鮑率", type: "number", hint: "LR24-F 序列埠常見 115200 ⟳" },
-  { path: "link.goto_altitude_ref", label: "GOTO 高度基準", type: "select",
-    options: [["rel_home", "相對 Home（節點限 30~120m）"], ["amsl", "AMSL 海拔"]], hint: "lr24 模式送 GOTO / GOTO_AMSL ⟳" },
+  { sec: "接飛控的 MAVLink 數傳（電台）" },
+  { path: "mavlink.port", label: "數傳 COM 埠", type: "text",
+    hint: "接 Pixhawk 的那條電台在筆電上的 COM 埠。你的 LR24 直接接飛控＝就填 LR24 的埠（例 COM10）⟳" },
+  { path: "mavlink.baud", label: "鮑率", type: "number", hint: "LR24 用 115200；一般 SiK 電台 57600 ⟳" },
+  { sec: "指令送出方式（線路選擇）" },
+  { path: "link.command_backend", label: "指令走哪條路", type: "seg",
+    options: [["direct", "直接接飛控"], ["lr24", "經機上 RPi"]],
+    hint: "direct=上面那條數傳既讀 pose 又直接發 DO_REPOSITION 給 PX4（四軸首飛、你目前的接法）；"
+        + "lr24=另有機上 companion 跑 global_goto_node，這條 LR24 送文字指令給它 ⟳" },
+  { path: "link.lr24_port", label: "LR24 指令 COM 埠", type: "text", only: "lr24",
+    hint: "只有『經機上 RPi』才需要：送指令用的 LR24，與上面讀 pose 的電台是不同兩條 ⟳" },
+  { path: "link.lr24_baud", label: "LR24 鮑率", type: "number", only: "lr24", hint: "常見 115200 ⟳" },
+  { path: "link.goto_altitude_ref", label: "GOTO 高度基準", type: "select", only: "lr24",
+    options: [["rel_home", "相對 Home（節點限 30~120m）"], ["amsl", "AMSL 海拔"]], hint: "送 GOTO / GOTO_AMSL ⟳" },
 ];
 
 function getPath(obj, path) {
   return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+/* 依「指令走哪條路」顯示/隱藏 LR24 專屬欄位，並在下方畫出對應接線說明 */
+function updateBackendRows() {
+  const seg = document.querySelector('.seg[data-path="link.command_backend"]');
+  if (!seg) return;
+  const sel = seg.querySelector("button.sel");
+  const backend = sel ? sel.dataset.val : "direct";
+
+  document.querySelectorAll("#settings-form .cfg-row[data-only]").forEach((row) => {
+    row.style.display = row.dataset.only === backend ? "" : "none";
+  });
+
+  let note = document.getElementById("backend-note");
+  if (!note) {
+    note = document.createElement("div");
+    note.id = "backend-note";
+    note.className = "meta-box";
+    seg.closest(".cfg-section").appendChild(note);
+  }
+  note.innerHTML =
+    backend === "direct"
+      ? "<b>接線</b>：數傳電台（你的 LR24 或 SiK）直接接 Pixhawk TELEM1，另一端插筆電。" +
+        "上面「數傳 COM 埠」填這條電台的埠，這一條就同時負責讀 pose 和發指令。" +
+        "<b>不需要機上 RPi。</b>下面的 LR24 指令欄位在這個模式用不到。"
+      : "<b>接線</b>：需要兩條無線鏈路——① SiK/MAVLink 電台接 Pixhawk 讀 pose（上面「數傳 COM 埠」）；" +
+        "② LR24 送文字指令給機上 companion 的 global_goto_node（下面「LR24 指令 COM 埠」）。" +
+        "四軸要走這條需先套 global_goto_node 多旋翼 patch。";
 }
 
 async function loadSettings() {
@@ -444,6 +475,7 @@ async function loadSettings() {
       ctrl = `<input type="text" data-path="${f.path}" value="${value ?? ""}">`;
     }
     row.innerHTML = `<label>${f.label}</label>${ctrl}` + (f.hint ? `<div class="hint">${f.hint}</div>` : "");
+    if (f.only) row.dataset.only = f.only;   // 僅特定後端才顯示的欄位
     section.appendChild(row);
   });
 
@@ -451,8 +483,10 @@ async function loadSettings() {
     btn.addEventListener("click", () => {
       btn.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("sel"));
       btn.classList.add("sel");
+      if (btn.parentElement.dataset.path === "link.command_backend") updateBackendRows();
     })
   );
+  updateBackendRows();  // 初次載入依目前選擇顯示/隱藏
 
   const meta = data.meta;
   $("#cfg-meta").innerHTML =
@@ -587,26 +621,37 @@ $("#calib-save").addEventListener("click", async () => {
    MJPEG <img> 在伺服器/引擎重啟後會卡死不重連，操作員看到凍結畫面很危險。
    改成輪詢單幀 /frame.jpg：用 onload 串接下一張（不會塞車），
    失敗就顯示「連線中斷」並自動重試——任何重啟都能恢復。 */
-function startFramePoller(imgId, { fps = 12, lostId = null } = {}) {
+function startFramePoller(imgId, { fps = 12, lostId = null, failsToShowLost = 5 } = {}) {
   const img = document.getElementById(imgId);
   if (!img) return;
   const lost = lostId ? document.getElementById(lostId) : null;
   const minGap = 1000 / fps;
   let stopped = false;
+  let consecFails = 0;
 
   const tick = () => {
     if (stopped) return;
+    // 面板沒顯示時（在別的分頁）不輪詢，省下瀏覽器連線數——兩個面板同時猛輪詢
+    // 會佔滿每主機 ~6 條連線，造成偶發請求失敗、誤報「連線中斷」。
+    if (img.offsetParent === null) {
+      setTimeout(tick, 400);
+      return;
+    }
     const started = performance.now();
     const probe = new Image();
     probe.onload = () => {
       img.src = probe.src;           // 成功才換上去，避免破圖閃爍
-      if (lost) lost.hidden = true;
+      consecFails = 0;
+      if (lost) lost.hidden = true;  // 一成功就立刻收掉提示
       const wait = Math.max(0, minGap - (performance.now() - started));
       setTimeout(tick, wait);
     };
     probe.onerror = () => {
-      if (lost) lost.hidden = false;  // 503/斷線 → 顯示提示、放慢重試
-      setTimeout(tick, 800);
+      // 單次失敗是正常的（連線佔用、剛好沒新幀）；連續多次才算真的中斷，
+      // 否則畫面明明在更新卻一直閃「中斷」。
+      consecFails += 1;
+      if (lost && consecFails >= failsToShowLost) lost.hidden = false;
+      setTimeout(tick, consecFails >= failsToShowLost ? 800 : minGap);
     };
     probe.src = "/frame.jpg?t=" + Date.now();
   };

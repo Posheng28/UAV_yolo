@@ -161,18 +161,26 @@ def check_telemetry(engine, cfg) -> CheckResult:
     att = store.attitude_at(now)
     pos = store.position_at(now)
     link_ok = store.link_alive(now, float(cfg.get("safety.link_timeout_s", 2.0)))
-    missing = []
-    if att is None:
-        missing.append("姿態(ATTITUDE)")
-    if pos is None:
-        missing.append("位置(GLOBAL_POSITION_INT)")
+
     if not link_ok:
         return _r("telemetry", "數傳遙測", "fail", "鏈路逾時（曾收到心跳但已中斷）",
                   "檢查電台距離/天線/電源")
-    if missing:
+
+    # 姿態(ATTITUDE) 來自 IMU、與 GPS 無關 → 沒有它才是真的串流問題
+    if att is None:
         return _r("telemetry", "數傳遙測", "fail",
-                  f"心跳正常（模式 {hb.mode}）但缺少：{'、'.join(missing)}",
-                  "飛控可能未回應串流要求；重開飛控或確認 SET_MESSAGE_INTERVAL 支援")
+                  f"心跳正常（模式 {hb.mode}）但收不到姿態(ATTITUDE)",
+                  "飛控未回應串流要求；重開飛控或確認 SET_MESSAGE_INTERVAL 支援")
+
+    # 位置(GLOBAL_POSITION_INT) 要等 GPS 定位後 PX4 才會送 → 缺位置不是數傳的錯，
+    # 是 GPS 還沒 fix（見下方「GPS 品質」那條），這裡不重複報成故障。
+    if pos is None:
+        return _r("telemetry", "數傳遙測", "warn",
+                  f"鏈路正常（模式 {hb.mode}、姿態有）但尚無位置——這是 GPS 還沒定位的結果，"
+                  f"不是數傳問題，處理下方「GPS 品質」即可",
+                  "GPS 定位後位置會自動出現",
+                  mode=hb.mode, armed=hb.armed)
+
     return _r("telemetry", "數傳遙測", "pass",
               f"模式 {hb.mode}｜{'已解鎖' if hb.armed else '未解鎖'}｜"
               f"高度 {pos.rel_alt:.0f}m｜姿態與位置正常",

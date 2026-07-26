@@ -69,6 +69,29 @@ def test_missing_telemetry_is_reported_as_fail(tmp_path):
     assert res["verdict"] == "fail"
 
 
+def test_no_position_is_warn_pointing_to_gps_not_a_telemetry_fault(tmp_path):
+    """缺 GLOBAL_POSITION_INT 是「GPS 還沒定位」的症狀，不是數傳故障。
+    數傳鏈路（心跳+姿態）健康時，缺位置只該 warn 並指向 GPS，不可 fail 也不可叫人重開飛控。"""
+    engine, world, cfg = make_engine(tmp_path)
+    crank(engine, world, 4.0)
+    engine.link.store._pos.clear()  # 模擬 GPS 未定位 → PX4 尚未送位置
+    res = run_selfcheck(engine, cfg)
+    k = by_key(res)
+
+    assert k["telemetry"]["status"] == "warn"
+    assert "GPS" in k["telemetry"]["detail"]
+    assert "重開飛控" not in k["telemetry"]["fix"]  # 不給誤導性的修法
+
+
+def test_missing_attitude_is_a_real_stream_fault(tmp_path):
+    """姿態來自 IMU、與 GPS 無關——收不到姿態才是真的串流問題（fail）。"""
+    engine, world, cfg = make_engine(tmp_path)
+    crank(engine, world, 4.0)
+    engine.link.store._att.clear()
+    res = run_selfcheck(engine, cfg)
+    assert by_key(res)["telemetry"]["status"] == "fail"
+
+
 def test_bad_gps_is_reported_as_fail(tmp_path):
     from uav_yolo.mavlink_io.telemetry import GpsSample
 

@@ -372,16 +372,20 @@ class MavlinkConnection:
 
             elif mtype == "GPS_RAW_INT":
                 # 公尺精度來自 MAVLink 2 擴充欄位 h_acc/v_acc（mm）；
-                # eph/epv 是 HDOP/VDOP×100（無因次），別當距離用
+                # eph/epv 是 HDOP/VDOP×100（無因次），別當距離用。
+                # 0 與 UINT32_MAX(4294967295) 都代表「未知」——沒定位時是這個哨兵值。
+                UINT32_MAX = 4294967295
                 h_acc = getattr(msg, "h_acc", 0) or 0
                 v_acc = getattr(msg, "v_acc", 0) or 0
+                h_known = 0 < h_acc < UINT32_MAX
+                v_known = 0 < v_acc < UINT32_MAX
                 self.store.set_gps(
                     GpsSample(
                         t=now,
                         fix_type=int(msg.fix_type),
                         satellites=int(msg.satellites_visible),
-                        eph_m=(h_acc / 1000.0) if h_acc > 0 else float("inf"),
-                        epv_m=(v_acc / 1000.0) if v_acc > 0 else float("inf"),
+                        eph_m=(h_acc / 1000.0) if h_known else float("inf"),
+                        epv_m=(v_acc / 1000.0) if v_known else float("inf"),
                         hdop=None if msg.eph in (0, 65535) else msg.eph / 100.0,
                         vdop=None if msg.epv in (0, 65535) else msg.epv / 100.0,
                     )

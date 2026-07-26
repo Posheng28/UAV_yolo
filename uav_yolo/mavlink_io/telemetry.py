@@ -244,6 +244,11 @@ class MavlinkConnection:
         self._last_att_t: float | None = None
         self._last_interval_req_t = 0.0
         self.error: str | None = None
+        # 診斷計數：分辨「完全沒資料（電台/接線/供電）」vs「有資料但解不出（鮑率不合）」
+        self.raw_bytes = 0
+        self.msgs_parsed = 0
+        self.heartbeats_seen = 0
+        self.hb_wrong_comp = 0  # 收到心跳但來自非自駕儀元件（雲台/相機）
 
     # ---- 生命週期 ----
 
@@ -285,14 +290,20 @@ class MavlinkConnection:
                 self.error = f"MAVLink 接收異常：{exc}"  # 別靜默吞掉，UI 要看得到
                 time.sleep(0.1)
                 continue
+            # 原始位元組總量（pymavlink 累計）：即使解不出任何封包也會增加，
+            # 用來判斷「有沒有東西進來」——鮑率不合時 bytes 漲、封包=0。
+            self.raw_bytes = getattr(getattr(self._conn, "mav", None), "total_bytes_received", self.raw_bytes)
             if msg is None:
                 continue
+            self.msgs_parsed += 1
             now = time.monotonic()
             mtype = msg.get_type()
 
             if mtype == "HEARTBEAT":
+                self.heartbeats_seen += 1
                 # 只認自駕儀元件的心跳（雲台/相機也會發心跳，別混入）
                 if msg.get_srcComponent() != 1:
+                    self.hb_wrong_comp += 1
                     continue
                 self._target_sys = msg.get_srcSystem()
                 armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)

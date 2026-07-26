@@ -124,12 +124,39 @@ def check_telemetry(engine, cfg) -> CheckResult:
     store = engine.link.store
     now = engine.clock()
     hb = store.heartbeat
+
+    # 診斷計數（direct 模式下 link 就是 MavlinkConnection；lr24 模式在 .telemetry）
+    conn = engine.link if hasattr(engine.link, "raw_bytes") else getattr(engine.link, "telemetry", None)
+    raw = getattr(conn, "raw_bytes", None)
+    msgs = getattr(conn, "msgs_parsed", None)
+    hb_wrong = getattr(conn, "hb_wrong_comp", 0)
+    port = cfg.get("mavlink.port")
+    baud = cfg.get("mavlink.baud")
+
     if hb is None:
         err = getattr(engine.link, "error", None)
-        return _r("telemetry", "數傳遙測", "fail",
-                  f"收不到心跳（{err or '無資料'}）",
-                  f"確認電台已插、COM 埠正確（目前 {cfg.get('mavlink.port')}）、"
-                  f"鮑率 {cfg.get('mavlink.baud')}；QGC 若佔用同一埠請先關掉")
+        if err:
+            detail, fix = f"連線錯誤：{err}", f"確認 {port} 存在且未被 QGC/其他程式佔用"
+        elif raw is not None and raw == 0:
+            # 完全沒有位元組進來 → 不是鮑率問題，是更前端
+            detail = f"完全收不到資料（{port} 上 0 bytes）"
+            fix = ("① 電台恆綠只代表兩顆連上，不代表接到飛控。確認**空中端 LR24 有插到 "
+                   "Pixhawk 的 TELEM 口**（TX↔RX 交叉、共地）② Pixhawk 有通電 "
+                   "③ 該 TELEM 口在 PX4 設為 MAVLink 輸出")
+        elif raw and msgs == 0:
+            # 有位元組但一個封包都解不出 → 幾乎一定是鮑率不合
+            detail = f"收到 {raw} bytes 但解不出任何 MAVLink 封包"
+            fix = (f"**鮑率不合**：空中端 LR24 的『串口波特率』要等於 Pixhawk 那個 TELEM 口的鮑率。"
+                   f"你把 LR24 串口設成 115200，但 PX4 TELEM 預設常是 57600 → 在 QGC 把該口 "
+                   f"SER_TELx_BAUD 設成 115200（或把 LR24 串口改回 57600）")
+        elif hb_wrong:
+            detail = f"收到 {msgs} 個封包、{hb_wrong} 個心跳，但都來自非自駕儀元件"
+            fix = "收到的是雲台/相機的心跳，不是飛控本身；確認 TELEM 口直連 Pixhawk"
+        else:
+            detail = f"收到 {msgs or 0} 個封包但無飛控心跳"
+            fix = f"確認 {port}/{baud} 正確、Pixhawk 該口輸出 MAVLink；QGC 佔用同埠請先關"
+        return _r("telemetry", "數傳遙測", "fail", detail, fix,
+                  raw_bytes=raw, msgs=msgs)
 
     att = store.attitude_at(now)
     pos = store.position_at(now)

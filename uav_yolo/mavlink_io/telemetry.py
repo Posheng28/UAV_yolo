@@ -242,6 +242,8 @@ class MavlinkConnection:
         self._target_comp = 1
         self._intervals_requested = False
         self._last_att_t: float | None = None
+        self._last_pos_t: float | None = None
+        self._hb_count = 0
         self._last_interval_req_t = 0.0
         self.error: str | None = None
         # 診斷計數：分辨「完全沒資料（電台/接線/供電）」vs「有資料但解不出（鮑率不合）」
@@ -332,12 +334,16 @@ class MavlinkConnection:
                 self._target_sys = msg.get_srcSystem()
                 armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 self.store.set_heartbeat(Heartbeat(t=now, mode=mode_string(msg.custom_mode), armed=armed))
-                # 首次心跳要求串流；之後若「心跳還在但姿態斷流 >5s」（典型＝飛控重開機，
-                # SET_MESSAGE_INTERVAL 全被洗掉）就重新要求，否則遙測永遠回不來。
+                # 要求串流。SET_MESSAGE_INTERVAL 是一次性上行指令，在 LR24 這種無線
+                # 上行掉一封就沒了；而且不同訊息（姿態 vs 位置）要分開要求，任何一條
+                # 沒進來都要重發。因此：①開頭前 15 秒每次心跳都重發（提高送達率）
+                # ②之後只要「姿態或位置」任一條斷流 >5s 就重發。
+                self._hb_count += 1
                 att_stale = self._last_att_t is None or (now - self._last_att_t) > 5.0
-                if not self._intervals_requested or (
-                    att_stale and (now - self._last_interval_req_t) > 5.0
-                ):
+                pos_stale = self._last_pos_t is None or (now - self._last_pos_t) > 5.0
+                warmup = self._hb_count <= 15  # 開頭多發幾次，扛掉上行掉包
+                due = (now - self._last_interval_req_t) > 3.0
+                if not self._intervals_requested or warmup or ((att_stale or pos_stale) and due):
                     self._request_intervals()
                     self._intervals_requested = True
                     self._last_interval_req_t = now
@@ -349,6 +355,7 @@ class MavlinkConnection:
             elif mtype == "GLOBAL_POSITION_INT":
                 if msg.lat == 0 and msg.lon == 0:
                     continue
+                self._last_pos_t = now
                 self.store.push_position(
                     PositionSample(
                         t=now,

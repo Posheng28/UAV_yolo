@@ -634,19 +634,29 @@ $("#calib-save").addEventListener("click", async () => {
    MJPEG <img> 在伺服器/引擎重啟後會卡死不重連，操作員看到凍結畫面很危險。
    改成輪詢單幀 /frame.jpg：用 onload 串接下一張（不會塞車），
    失敗就顯示「連線中斷」並自動重試——任何重啟都能恢復。 */
-function startFramePoller(imgId, { fps = 12, lostId = null, failsToShowLost = 5 } = {}) {
+function startFramePoller(imgId, { fps = 12, lostId = null, staleMs = 2500 } = {}) {
   const img = document.getElementById(imgId);
   if (!img) return;
   const lost = lostId ? document.getElementById(lostId) : null;
   const minGap = 1000 / fps;
   let stopped = false;
-  let consecFails = 0;
+  let lastGoodAt = performance.now();
+
+  // 覆蓋層只根據「距離上一張成功畫面多久」判斷，不看單次請求成敗。
+  // 理由：畫面正在更新卻顯示「中斷」是最糟的 UI 謊言——操作員會誤判鏈路壞掉。
+  // 唯一該顯示的情況是「畫面真的停了」，而那就是 staleMs 沒有更新。
+  const refreshOverlay = () => {
+    if (!lost) return;
+    lost.hidden = performance.now() - lastGoodAt < staleMs;
+  };
 
   const tick = () => {
     if (stopped) return;
-    // 面板沒顯示時（在別的分頁）不輪詢，省下瀏覽器連線數——兩個面板同時猛輪詢
-    // 會佔滿每主機 ~6 條連線，造成偶發請求失敗、誤報「連線中斷」。
+    // 面板沒顯示時（在別的分頁）不輪詢，省瀏覽器連線數。此時也不該累積「過期」，
+    // 否則切回來會先閃一下中斷。
     if (img.offsetParent === null) {
+      lastGoodAt = performance.now();
+      if (lost) lost.hidden = true;
       setTimeout(tick, 400);
       return;
     }
@@ -654,17 +664,16 @@ function startFramePoller(imgId, { fps = 12, lostId = null, failsToShowLost = 5 
     const probe = new Image();
     probe.onload = () => {
       img.src = probe.src;           // 成功才換上去，避免破圖閃爍
-      consecFails = 0;
-      if (lost) lost.hidden = true;  // 一成功就立刻收掉提示
+      lastGoodAt = performance.now();
+      refreshOverlay();
       const wait = Math.max(0, minGap - (performance.now() - started));
       setTimeout(tick, wait);
     };
     probe.onerror = () => {
-      // 單次失敗是正常的（連線佔用、剛好沒新幀）；連續多次才算真的中斷，
-      // 否則畫面明明在更新卻一直閃「中斷」。
-      consecFails += 1;
-      if (lost && consecFails >= failsToShowLost) lost.hidden = false;
-      setTimeout(tick, consecFails >= failsToShowLost ? 800 : minGap);
+      // 單次失敗完全正常（連線佔用、剛好沒新幀、引擎重啟中）；
+      // 只有超過 staleMs 沒拿到任何新畫面才提示。
+      refreshOverlay();
+      setTimeout(tick, minGap);
     };
     probe.src = "/frame.jpg?t=" + Date.now();
   };

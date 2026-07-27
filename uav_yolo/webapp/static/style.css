@@ -105,6 +105,9 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
   background: rgba(35, 32, 27, .82); color: #f7e3e0; font-weight: 700; font-size: 1rem;
   border-radius: 10px;
 }
+/* display:flex 的優先權高於瀏覽器內建的 [hidden]{display:none}，
+   沒有這條的話 JS 設 hidden 也關不掉，覆蓋層會永遠蓋在畫面上。 */
+.stream-lost[hidden] { display: none; }
 .warn-line { margin-top: 8px; color: var(--red); font-weight: 700; }
 
 /* ---------- 導引卡 ---------- */

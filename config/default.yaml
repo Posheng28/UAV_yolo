@@ -58,10 +58,22 @@ detector:
   #   weights/best.pt    空拍真車（自訓）
   #   weights/yolo26n.pt COCO 通用 80 類（含真實汽車/卡車/行人）
   #   weights/yolo11s.pt COCO 通用 small，較準較慢
+  #
+  # 選 .onnx 檔＝走 ONNX Runtime + DirectML，用 AMD/Intel GPU 推論。
+  # 本機實測（Radeon RX 7700S，同 120 幀、結果逐框相同）：
+  #   PyTorch CPU 129ms/幀（8 FPS） → ONNX DirectML 9.4ms/幀（97 FPS），13.8x
+  # 迴圈速率直接決定追蹤品質：太慢時目標在兩個處理幀之間跑太遠會關聯不上。
+  # 匯出（換了 .pt 就要重匯出）：
+  #   set ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS=1
+  #   python -c "from ultralytics import YOLO; YOLO('weights/toycar.pt').export(
+  #       format='onnx', imgsz=[384,640], dynamic=False, simplify=True, opset=20)"
+  # imgsz 在匯出時就固定（DirectML 對 dynamic shape 會變慢），之後改設定無效，
+  # 系統會在設定頁明講「未套用」而不是默默忽略。
   weights: weights/best.pt   # 不存在時自動退 yolo26n.pt（COCO 預訓練）
   class_names: [Car, Truck]  # 允許鎖定的類別（依權重的類別名）
   conf: 0.55
-  imgsz: 640
+  imgsz: 640                 # 僅 .pt 有效；必須對齊模型訓練時的 imgsz，
+                             # 放大不會更準只會更慢（實測 1280 比 640 又慢又差）
   lock_mode: auto       # auto=最大目標連續N幀自動鎖定 | manual=UI點選才鎖定
   min_lock_frames: 6    # 連續看到幾幀才允許鎖定（承襲原系統規格）
 

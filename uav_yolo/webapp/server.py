@@ -190,12 +190,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         wdir = PROJECT_ROOT / "weights"
         out = []
         if wdir.is_dir():
-            for p in sorted(wdir.glob("*.pt")):
+            for p in sorted(list(wdir.glob("*.pt")) + list(wdir.glob("*.onnx"))):
+                # .onnx 是同名 .pt 匯出的，用途說明沿用；後綴標明它走 GPU 推論
+                note = WEIGHT_NOTES.get(p.name) or WEIGHT_NOTES.get(p.stem + ".pt", "")
+                if p.suffix == ".onnx":
+                    note = (note + "｜ONNX：DirectML GPU 推論、尺寸固定").lstrip("｜")
                 out.append({
                     "path": f"weights/{p.name}",
                     "name": p.name,
                     "size_mb": round(p.stat().st_size / 1e6, 1),
-                    "note": WEIGHT_NOTES.get(p.name, ""),
+                    "note": note,
                 })
         return out
 

@@ -156,7 +156,11 @@ function renderStatus(st) {
   $("#video-label").textContent = st.video.device || "影像";
   $("#video-fps").textContent = st.video.connected ? `${fmt(st.video.fps, 0)} FPS` : "未連線";
   const ve = $("#video-error");
-  const err = st.video.error || st.mavlink.error;
+  // 偵測/迴圈例外排在最前面：它們的症狀是「畫面正常但完全偵測不到」，
+  // 不講出來只會被誤判成「模型不準」而往錯的方向查。
+  const err = (st.loop_error ? `引擎迴圈錯誤：${st.loop_error}` : "")
+    || (st.detector_error ? `偵測失敗：${st.detector_error}` : "")
+    || st.video.error || st.mavlink.error;
   ve.hidden = !err;
   if (err) ve.textContent = err;
 

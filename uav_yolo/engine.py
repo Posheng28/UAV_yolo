@@ -71,6 +71,8 @@ class EngineStatus:
     mavlink: dict = field(default_factory=dict)
     gimbal: dict = field(default_factory=dict)
     loop_hz: float = 0.0
+    detector_error: str | None = None  # 推論丟例外＝畫面看似沒車，必須讓操作員看到
+    loop_error: str | None = None      # 迴圈本體例外（比偵測失敗更嚴重）
 
 
 class TrackerEngine:
@@ -147,6 +149,8 @@ class TrackerEngine:
         self.last_roi_t: float | None = None
         self.last_gimbal_cmd: tuple[float, float] | None = None  # (pitch_rad, yaw_rad)
         self.last_meas_note = ""
+        self.detector_error: str | None = None
+        self.loop_error: str | None = None
         self.last_known_lla: tuple[float, float] | None = None
         self.gate_report_blocked: list[str] = []
         self.guidance_note = ""
@@ -185,7 +189,13 @@ class TrackerEngine:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            progressed = self.step()
+            try:
+                progressed = self.step()
+            except Exception as exc:
+                # 迴圈執行緒死掉是最惡劣的失效模式：/api/status 仍回上一份快照，
+                # 儀表板顯示一切正常，實際上早就停止追蹤了。寧可記錄並續跑。
+                self.loop_error = f"{type(exc).__name__}: {exc}"
+                progressed = False
             time.sleep(0.005 if progressed else 0.02)
 
     # ------------------------------------------------ UI 操作
@@ -219,7 +229,12 @@ class TrackerEngine:
         # imgsz 只是 predict 的參數、不必重載模型，但漏掉它會讓設定頁改了沒反應
         # （UI 又沒標 ⟳）＝靜默失效。而它直接決定迴圈速率：CPU 推論下
         # 1280 需 304ms/幀（3.3Hz）、640 只要 167ms（6Hz）。
-        if hasattr(self.detector, "imgsz"):
+        if hasattr(self.detector, "set_imgsz"):
+            # ONNX 是靜態尺寸，套不上時要把原因回報到 UI，不能默默忽略
+            reason = self.detector.set_imgsz(int(det_cfg.get("imgsz", 640)))
+            if reason:
+                applied.append(f"（imgsz 未套用：{reason}）")
+        elif hasattr(self.detector, "imgsz"):
             self.detector.imgsz = int(det_cfg.get("imgsz", 640))
         self.lock.mode = det_cfg.get("lock_mode", "auto")
         self.lock.min_lock_frames = int(det_cfg.get("min_lock_frames", 6))
@@ -286,7 +301,14 @@ class TrackerEngine:
         if store.home is not None:
             self.home_alt_amsl = store.home.alt_amsl  # 高度基準用最新（PX4 解鎖時會重設 home）
 
-        detections = self.detector.detect(frame, frame_t)
+        try:
+            detections = self.detector.detect(frame, frame_t)
+            self.detector_error = None
+        except Exception as exc:
+            # 換權重/換推論後端最容易在這裡炸（形狀不符、模型檔壞、驅動問題）。
+            # 靜默回空清單會讓操作員以為「畫面裡沒車」，必須讓 UI 看得到。
+            self.detector_error = f"{type(exc).__name__}: {exc}"
+            detections = []
         locked_det = self.lock.update(detections)
 
         # 影像鏈路有固定延遲（RTSP/數位圖傳可達數百 ms）：這一幀「拍的是」
@@ -653,6 +675,8 @@ class TrackerEngine:
                 "has_feedback": store.gimbal_at(self._last_capture_t or now) is not None,
             },
             loop_hz=round(loop_hz, 1),
+            detector_error=self.detector_error,
+            loop_error=self.loop_error,
         )
         status.vehicle["path"] = list(self.vehicle_path)[-200:]
         status.target["path"] = list(self.target_path)[-200:]

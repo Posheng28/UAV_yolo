@@ -74,7 +74,7 @@ def main() -> int:
     from ultralytics import YOLO
 
     model = YOLO(weights)
-    model.train(
+    results = model.train(
         data=str(yaml_path.resolve()),
         epochs=args.epochs,
         imgsz=args.imgsz,
@@ -94,7 +94,11 @@ def main() -> int:
         exist_ok=True,
     )
 
-    best = Path("runs/toycar/weights/best.pt")
+    # 輸出目錄要跟 ultralytics 問，不能自己拼：相對的 project 會被 cfg 前綴成
+    # `settings['runs_dir']/<task>/`，實際落在 runs/detect/runs/toycar/，
+    # 於是訓練成功也會印「找不到輸出權重」。
+    save_dir = Path(getattr(results, "save_dir", "runs/toycar"))
+    best = save_dir / "weights" / "best.pt"
     print("\n" + "=" * 60)
     if best.exists():
         print(f">>> 訓練完成：{best}")

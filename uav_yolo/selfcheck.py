@@ -113,10 +113,24 @@ def check_detector(engine, cfg) -> CheckResult:
     conf = float(cfg.get("detector.conf", 0.55))
     extra = f"，目前畫面 {n} 個偵測" if n else "，目前畫面無偵測（對著目標測試）"
     status = "pass" if n else "warn"
+
+    # 「以為在跑 GPU、其實悄悄退回 CPU」會讓迴圈慢十倍以上而毫無提示，
+    # 是這條鏈路唯一看得出來的地方——寧可吵，也不要飛行中默默變慢。
+    provider = getattr(det, "provider", None)
+    fallback = getattr(det, "fallback_reason", None)
+    if provider:
+        extra += f"，推論後端 {provider}"
+    if fallback:
+        return _r("detector", "YOLO 偵測", "warn",
+                  f"使用 {weights}（conf={conf}）{extra}",
+                  f"{fallback}——迴圈速率會掉到 CPU 水準。"
+                  "檢查 onnxruntime-directml 是否安裝、顯示卡驅動是否正常",
+                  detections=n, conf=conf, provider=provider)
+
     return _r("detector", "YOLO 偵測", status,
               f"使用 {weights}（conf={conf}）{extra}",
               "對著車輛測試；一直抓不到可把 detector.conf 降到 0.3~0.4",
-              detections=n, conf=conf)
+              detections=n, conf=conf, provider=provider)
 
 
 def check_telemetry(engine, cfg) -> CheckResult:

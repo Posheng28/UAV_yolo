@@ -70,12 +70,17 @@ def test_every_referenced_element_id_exists():
 
 # ---------------- 前端讀的狀態欄位後端要真的發 ----------------
 
-def test_status_payload_contains_fields_frontend_reads():
-    """用真的 sim 引擎產一次狀態，比對前端 renderStatus 讀的頂層欄位。"""
+def test_status_payload_contains_fields_frontend_reads(tmp_path):
+    """用真的 sim 引擎產一次狀態，比對前端 renderStatus 讀的頂層欄位。
+
+    local_path 一定要指到 tmp_path：`Config()` 不帶參數會指向專案真正的
+    config/local.yaml，`update()` 就會把使用者的設定改掉——實際發生過，
+    跑一次測試就把操作員的地面站從實機模式偷偷切回模擬。
+    """
     from uav_yolo.config import Config
     from uav_yolo.simulation import build_sim_engine
 
-    cfg = Config()
+    cfg = Config(local_path=tmp_path / "local.yaml")
     cfg.update({"system": {"mode": "sim"}})
     engine = build_sim_engine(cfg, realtime=False)
     engine.sim_world.step(0.05)
@@ -90,6 +95,9 @@ def test_status_payload_contains_fields_frontend_reads():
         "state", "sim", "airframe", "guidance_enabled", "guidance_note",
         "gates", "detections", "target", "vehicle", "video", "mavlink",
         "gimbal", "last_command", "loop_hz",
+        # 偵測/迴圈例外：症狀是「畫面正常但完全偵測不到」，沒有這兩個欄位
+        # 操作員只會以為模型不準，往完全錯的方向查
+        "detector_error", "loop_error",
     }
     missing = expected - set(payload)
     assert not missing, f"狀態少了前端會讀的欄位：{sorted(missing)}"

@@ -60,8 +60,15 @@ class Detector:
         self.imgsz = int(imgsz)
         self.allowed_names = class_names
         self.assigner = StableIdAssigner()
+        self.backend_name = "ultralytics"
+        self.provider: str | None = None       # ONNX 時是實際的 execution provider
+        self.fallback_reason: str | None = None  # 想用 DirectML 卻退回 CPU 的原因
         self._model = None
         self._class_ids: set[int] | None = None
+
+    @property
+    def is_onnx(self) -> bool:
+        return str(self.weights_path).lower().endswith(".onnx")
 
     @staticmethod
     def _resolve_weights(weights: str) -> str:
@@ -70,41 +77,77 @@ class Detector:
             return weights
         return "yolo26n.pt"
 
+    def _apply_class_filter(self, names: dict[int, str]) -> None:
+        self._class_ids = build_class_filter(names, self.allowed_names)
+        # COCO fallback 時允許 car/truck 同義映射
+        if self._class_ids is None and self.allowed_names:
+            self._class_ids = build_class_filter(names, ["car", "truck", "bus"])
+
     def _ensure_model(self):
         if self._model is None:
-            from ultralytics import YOLO
+            if self.is_onnx:
+                from .onnx_backend import OnnxRuntimeBackend
 
-            self._model = YOLO(self.weights_path)
-            self._class_ids = build_class_filter(self._model.names, self.allowed_names)
-            # COCO fallback 時允許 car/truck 同義映射
-            if self._class_ids is None and self.allowed_names:
-                coco_alias = {"car", "truck", "bus"}
-                self._class_ids = build_class_filter(
-                    self._model.names, [n for n in coco_alias]
-                )
+                backend = OnnxRuntimeBackend(self.weights_path)
+                backend.warmup()
+                self._model = backend
+                self.backend_name = "onnx"
+                self.provider = backend.provider
+                self.fallback_reason = backend.fallback_reason
+                self._apply_class_filter(backend.names)
+            else:
+                from ultralytics import YOLO
+
+                self._model = YOLO(self.weights_path)
+                self._apply_class_filter(self._model.names)
         return self._model
+
+    def set_imgsz(self, value: int) -> str | None:
+        """熱套用推論尺寸；不能套用時回傳原因字串（給 UI 顯示）。
+
+        ONNX 是靜態尺寸匯出（DirectML 對 dynamic shape 會明顯變慢），改設定值
+        不會有任何效果——這種「改了沒反應也沒提示」正是本專案要避免的靜默失效。
+        """
+        value = int(value)
+        if self.is_onnx:
+            if self._model is not None and value != max(self._model.input_hw):
+                return (
+                    f"ONNX 模型固定為 {self._model.input_hw[1]}x{self._model.input_hw[0]}，"
+                    f"要改成 {value} 請重新匯出"
+                )
+            return None
+        self.imgsz = value
+        return None
 
     def detect(self, frame, t: float | None = None) -> list[Detection]:
         """偵測本幀並回傳帶穩定 ID 的框；t 為該幀時間戳（秒），供速度外推用。"""
         model = self._ensure_model()
-        # 用 predict 而非 track：識別交給 StableIdAssigner，追蹤器的 ID 反而是
-        # 框消失的主因（見 tracking.py 開頭的實測），且省下每幀的光流補償運算。
-        results = model.predict(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
         stamp = time.monotonic() if t is None else float(t)
 
         boxes: list[tuple[float, float, float, float]] = []
         meta: list[tuple[str, float]] = []
-        for r in results:
-            if r.boxes is None:
-                continue
-            names = r.names
-            for box in r.boxes:
-                cls_id = int(box.cls[0])
+        if self.is_onnx:
+            raw_boxes, raw_meta = model.infer(frame, self.conf)
+            for bbox, (cls_id, conf) in zip(raw_boxes, raw_meta):
                 if self._class_ids is not None and cls_id not in self._class_ids:
                     continue
-                x1, y1, x2, y2 = map(float, box.xyxy[0])
-                boxes.append((x1, y1, x2, y2))
-                meta.append((str(names.get(cls_id, cls_id)), float(box.conf[0])))
+                boxes.append(bbox)
+                meta.append((model.names.get(cls_id, str(cls_id)), conf))
+        else:
+            # 用 predict 而非 track：識別交給 StableIdAssigner，追蹤器的 ID 反而是
+            # 框消失的主因（見 tracking.py 開頭的實測），且省下每幀的光流補償運算。
+            results = model.predict(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
+            for r in results:
+                if r.boxes is None:
+                    continue
+                names = r.names
+                for box in r.boxes:
+                    cls_id = int(box.cls[0])
+                    if self._class_ids is not None and cls_id not in self._class_ids:
+                        continue
+                    x1, y1, x2, y2 = map(float, box.xyxy[0])
+                    boxes.append((x1, y1, x2, y2))
+                    meta.append((str(names.get(cls_id, cls_id)), float(box.conf[0])))
 
         sids = self.assigner.assign(boxes, stamp)
         return [

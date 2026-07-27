@@ -70,6 +70,27 @@ def test_apply_live_config_updates_guidance_and_detector_and_latency(tmp_path):
     assert engine.coast_timeout_s == 12.0
 
 
+def test_apply_live_config_updates_detector_imgsz(tmp_path):
+    """imgsz 必須熱套用。
+
+    它不需重載模型（只是 predict 的參數），所以 UI 沒標 ⟳；漏掉熱套用就成了
+    「改了沒反應也沒提示」的靜默失效。而且它直接決定迴圈速率——CPU 推論下
+    實測 1280 需 304ms/幀（3.3Hz）、640 只要 167ms（6Hz），追移動目標差很多。
+    """
+    from uav_yolo.vision.detector import Detector
+
+    cfg = make_cfg(tmp_path)
+    engine = build_sim_engine(cfg, realtime=False)
+    engine.detector = Detector("weights/does-not-exist.pt", conf=0.5, imgsz=1280,
+                               class_names=["Car"])  # 模型延遲載入，這裡不會真的讀檔
+
+    cfg.update({"detector": {"imgsz": 640, "conf": 0.6}})
+    engine.apply_live_config()
+
+    assert engine.detector.imgsz == 640
+    assert engine.detector.conf == pytest.approx(0.6)
+
+
 def test_live_geofence_actually_blocks_commands(tmp_path):
     """端到端：改嚴圍欄後，原本會過的指令點必須被擋下。"""
     cfg = make_cfg(tmp_path)

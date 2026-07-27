@@ -1,16 +1,23 @@
 """YOLO 偵測與單一目標鎖定。
 
 修正舊系統「只拿第一個框就 break、多車亂跳」的問題：
-    - 使用 model.track 的追蹤 ID，鎖定單一 ID 跟到底。
+    - 每個框都指派一個跨幀穩定的 ID，鎖定單一 ID 跟到底。
     - auto 模式：同一 ID 連續出現 min_lock_frames 幀才鎖定（承襲原規格）。
     - manual 模式：UI 點選畫面上的框才鎖定。
     - 測地點用 bbox「底邊中點」（車輛接地位置），斜視角時比中心點準。
+
+識別碼刻意不用 ultralytics 追蹤器的 `boxes.id`：它在目標移動快時給不出 ID
+（實測 200 幀移動序列只有 2% 拿得到），而舊版「沒 ID 就丟掉」會讓框在車一動
+時整段消失。理由與實測數據見 tracking.StableIdAssigner。
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from .tracking import StableIdAssigner
 
 
 @dataclass
@@ -45,13 +52,14 @@ def build_class_filter(model_names: dict[int, str], allowed: list[str]) -> set[i
 
 
 class Detector:
-    """ultralytics YOLO 包裝：延遲載入、track 模式、類別過濾。"""
+    """ultralytics YOLO 包裝：延遲載入、類別過濾、穩定 ID 指派。"""
 
     def __init__(self, weights: str, conf: float, imgsz: int, class_names: list[str]):
         self.weights_path = self._resolve_weights(weights)
         self.conf = float(conf)
         self.imgsz = int(imgsz)
         self.allowed_names = class_names
+        self.assigner = StableIdAssigner()
         self._model = None
         self._class_ids: set[int] | None = None
 
@@ -76,14 +84,18 @@ class Detector:
                 )
         return self._model
 
-    def detect(self, frame) -> list[Detection]:
+    def detect(self, frame, t: float | None = None) -> list[Detection]:
+        """偵測本幀並回傳帶穩定 ID 的框；t 為該幀時間戳（秒），供速度外推用。"""
         model = self._ensure_model()
-        results = model.track(
-            frame, persist=True, conf=self.conf, imgsz=self.imgsz, verbose=False
-        )
-        detections: list[Detection] = []
+        # 用 predict 而非 track：識別交給 StableIdAssigner，追蹤器的 ID 反而是
+        # 框消失的主因（見 tracking.py 開頭的實測），且省下每幀的光流補償運算。
+        results = model.predict(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
+        stamp = time.monotonic() if t is None else float(t)
+
+        boxes: list[tuple[float, float, float, float]] = []
+        meta: list[tuple[str, float]] = []
         for r in results:
-            if r.boxes is None or r.boxes.id is None:
+            if r.boxes is None:
                 continue
             names = r.names
             for box in r.boxes:
@@ -91,21 +103,22 @@ class Detector:
                 if self._class_ids is not None and cls_id not in self._class_ids:
                     continue
                 x1, y1, x2, y2 = map(float, box.xyxy[0])
-                detections.append(
-                    Detection(
-                        track_id=int(box.id[0]),
-                        cls_name=str(names.get(cls_id, cls_id)),
-                        conf=float(box.conf[0]),
-                        bbox=(x1, y1, x2, y2),
-                    )
-                )
-        return detections
+                boxes.append((x1, y1, x2, y2))
+                meta.append((str(names.get(cls_id, cls_id)), float(box.conf[0])))
+
+        sids = self.assigner.assign(boxes, stamp)
+        return [
+            Detection(track_id=sid, cls_name=cls_name, conf=conf, bbox=bbox)
+            for sid, bbox, (cls_name, conf) in zip(sids, boxes, meta)
+        ]
 
 
 class TargetLock:
     """單一目標鎖定狀態機（純邏輯，可獨立測試）。"""
 
     PENDING_EXPIRE_FRAMES = 60  # 點選的 ID 若 ~3 秒內沒出現就放棄（防舊 ID 之後亂劫持）
+    REACQUIRE_FRAMES = 90       # 鎖定 ID 消失後，還願意用影像位置重新綁定的幀數
+    REACQUIRE_GATE_RADII = 4.0  # 重綁距離門檻，單位＝目標半徑（隨失聯時間放寬）
 
     def __init__(self, mode: str = "auto", min_lock_frames: int = 6):
         self.mode = mode  # auto | manual
@@ -115,6 +128,9 @@ class TargetLock:
         self._pending_age = 0
         self._candidate_id: int | None = None
         self._candidate_streak = 0
+        # 鎖定目標最後一次出現的影像位置與尺寸；ID 死掉時靠它重新綁定
+        self._last_box: tuple[float, float, float, float] | None = None
+        self._miss_age = 0
 
     @property
     def locked(self) -> bool:
@@ -130,6 +146,39 @@ class TargetLock:
         self._candidate_streak = 0
         self.pending_manual_id = None
         self._pending_age = 0
+        self._last_box = None
+        self._miss_age = 0
+
+    def _remember(self, det: Detection) -> None:
+        self._last_box = det.bbox
+        self._miss_age = 0
+
+    def _reacquire_by_image(self, detections: list[Detection]) -> Detection | None:
+        """鎖定的 ID 不見了 → 用「最後出現的影像位置」找回同一個目標。
+
+        沒有 GPS/遙測時這是唯一能重鎖的依據（世界座標重鎖需要 home 與位置，
+        室內測試根本拿不到，等於永遠不會執行）。門檻用目標半徑的倍數表示，
+        並隨失聯幀數放寬——目標可能一直在動。
+        """
+        if self._last_box is None or not detections:
+            return None
+        x1, y1, x2, y2 = self._last_box
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        w, h = max(1e-6, x2 - x1), max(1e-6, y2 - y1)
+        radius = 0.5 * (w + h) / 2.0
+        gate = self.REACQUIRE_GATE_RADII * (1.0 + 0.05 * self._miss_age)
+
+        best, best_cost = None, gate
+        for d in detections:
+            bx1, by1, bx2, by2 = d.bbox
+            bw, bh = max(1e-6, bx2 - bx1), max(1e-6, by2 - by1)
+            if max(bw / w, w / bw, bh / h, h / bh) > 3.0:
+                continue
+            dist = (((bx1 + bx2) / 2.0 - cx) ** 2 + ((by1 + by2) / 2.0 - cy) ** 2) ** 0.5
+            cost = dist / max(radius, 1e-6)
+            if cost < best_cost:
+                best, best_cost = d, cost
+        return best
 
     def update(self, detections: list[Detection]) -> Detection | None:
         """每幀呼叫，回傳目前鎖定目標的偵測（本幀沒看到回 None）。"""
@@ -152,7 +201,20 @@ class TargetLock:
                     return None  # 等點選的 ID 出現
 
         if self.locked_id is not None:
-            return by_id.get(self.locked_id)
+            det = by_id.get(self.locked_id)
+            if det is not None:
+                self._remember(det)
+                return det
+            # 鎖定的 ID 消失了。可能是目標被遮蔽/離開畫面，也可能只是識別斷了；
+            # 先用最後的影像位置嘗試接回同一個目標，接不回才算本幀沒看到。
+            self._miss_age += 1
+            if self._miss_age <= self.REACQUIRE_FRAMES:
+                cand = self._reacquire_by_image(detections)
+                if cand is not None:
+                    self.locked_id = cand.track_id
+                    self._remember(cand)
+                    return cand
+            return None
 
         if self.mode != "auto" or not detections:
             self._candidate_streak = 0
@@ -167,5 +229,8 @@ class TargetLock:
             self._candidate_streak = 1
         if self._candidate_streak >= self.min_lock_frames:
             self.locked_id = self._candidate_id
-            return by_id.get(self.locked_id)  # 鎖定當幀立即回傳，讓第一筆量測不延遲
+            det = by_id.get(self.locked_id)  # 鎖定當幀立即回傳，讓第一筆量測不延遲
+            if det is not None:
+                self._remember(det)
+            return det
         return None

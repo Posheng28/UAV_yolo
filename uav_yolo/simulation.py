@@ -367,7 +367,7 @@ class SimDetector:
     def __init__(self, video: SimVideoSource):
         self.video = video
 
-    def detect(self, frame) -> list[Detection]:
+    def detect(self, frame, t: float | None = None) -> list[Detection]:
         return list(self.video.last_detections)
 
 

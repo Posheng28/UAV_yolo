@@ -216,6 +216,11 @@ class TrackerEngine:
         det_cfg = cfg.section("detector")
         if hasattr(self.detector, "conf"):
             self.detector.conf = float(det_cfg.get("conf", 0.55))
+        # imgsz 只是 predict 的參數、不必重載模型，但漏掉它會讓設定頁改了沒反應
+        # （UI 又沒標 ⟳）＝靜默失效。而它直接決定迴圈速率：CPU 推論下
+        # 1280 需 304ms/幀（3.3Hz）、640 只要 167ms（6Hz）。
+        if hasattr(self.detector, "imgsz"):
+            self.detector.imgsz = int(det_cfg.get("imgsz", 640))
         self.lock.mode = det_cfg.get("lock_mode", "auto")
         self.lock.min_lock_frames = int(det_cfg.get("min_lock_frames", 6))
         applied.append("detector")
@@ -281,7 +286,7 @@ class TrackerEngine:
         if store.home is not None:
             self.home_alt_amsl = store.home.alt_amsl  # 高度基準用最新（PX4 解鎖時會重設 home）
 
-        detections = self.detector.detect(frame)
+        detections = self.detector.detect(frame, frame_t)
         locked_det = self.lock.update(detections)
 
         # 影像鏈路有固定延遲（RTSP/數位圖傳可達數百 ms）：這一幀「拍的是」

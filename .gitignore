@@ -14,6 +14,9 @@ config/local.yaml
 config/camera_intrinsics.yaml
 *.log
 
+# 訓練輸出（權重、曲線圖；每次訓練都會重生）
+runs/
+
 # 暫存
 .tmp*/
 .vscode/

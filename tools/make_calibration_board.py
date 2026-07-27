@@ -3,11 +3,17 @@
 規格與 UI 校正頁預設一致：10×7 格（= 9×6 內角點）、方格 25mm。
 列印必須 100% 實際大小（不可「縮放至頁面」），頁面附 100mm 尺規供驗證。
 
-用法：python tools/make_calibration_board.py
+用法：python tools/make_calibration_board.py [--compensate 0.97]
 輸出：calibration_board_A4.pdf（專案根目錄）
+
+--compensate X：印表機被迫縮放時的反向補償。例：實印 100mm 線量到 97mm
+→ --compensate 0.97，整張預先放大 1/0.97，印出來就回到正確尺寸。
+（註：均勻縮放其實不影響內參，補償只是讓尺寸標示誠實。）
 """
 
 from __future__ import annotations
+
+import argparse
 
 import matplotlib
 
@@ -15,9 +21,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
+ap = argparse.ArgumentParser()
+ap.add_argument("--compensate", type=float, default=1.0,
+                help="實印縮放比（實測長度/標稱長度），例 0.97；輸出會預放大 1/比值")
+args = ap.parse_args()
+K = 1.0 / args.compensate  # 預放大係數
+
 # A4 橫向（mm）
 PAGE_W, PAGE_H = 297.0, 210.0
-SQUARE = 25.0          # 方格邊長 mm
+SQUARE = 25.0 * K      # 方格邊長 mm（預補償後）
 COLS, ROWS = 10, 7     # 方格數（內角點 = 9×6）
 
 BOARD_W, BOARD_H = COLS * SQUARE, ROWS * SQUARE  # 250×175
@@ -40,12 +52,13 @@ for r in range(ROWS):
                                    SQUARE, SQUARE, facecolor="black",
                                    edgecolor="none"))
 
-# 100mm 驗證尺規（列印後量它，不是 100mm 就是印表機縮放了）
+# 100mm 驗證尺規（同樣預補償；列印後量它，就該是 100mm）
 ry = OY - 8.0
-ax.plot([OX, OX + 100.0], [ry, ry], color="black", linewidth=1.2)
-for x in (OX, OX + 100.0):
+RULER = 100.0 * K
+ax.plot([OX, OX + RULER], [ry, ry], color="black", linewidth=1.2)
+for x in (OX, OX + RULER):
     ax.plot([x, x], [ry - 1.6, ry + 1.6], color="black", linewidth=1.2)
-ax.text(OX + 50.0, ry - 3.2,
+ax.text(OX + RULER / 2, ry - 3.2,
         "this line must measure exactly 100 mm  (print at 100% / actual size)",
         ha="center", va="top", fontsize=7)
 

@@ -52,6 +52,12 @@ gimbal:
   roi_update_min_m: 2.0   # 目標估計位置移動超過此距離才重發 ROI（省數傳頻寬）
 
 detector:
+  # 偵測模型。⚠ 各模型只認自己訓練過的目標——實測：只用玩具車微調的模型
+  # 對真實空拍車輛的偵測數從 44 掉到 0（完全遺忘）。換場景務必在設定頁換模型。
+  #   weights/toycar.pt  室內玩具車（自訓）
+  #   weights/best.pt    空拍真車（自訓）
+  #   weights/yolo26n.pt COCO 通用 80 類（含真實汽車/卡車/行人）
+  #   weights/yolo11s.pt COCO 通用 small，較準較慢
   weights: weights/best.pt   # 不存在時自動退 yolo26n.pt（COCO 預訓練）
   class_names: [Car, Truck]  # 允許鎖定的類別（依權重的類別名）
   conf: 0.55

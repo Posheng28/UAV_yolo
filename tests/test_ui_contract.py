@@ -113,14 +113,28 @@ def test_restart_marked_fields_are_connection_shaped():
     apply_live_config 涵蓋：safety / guidance / detector / estimator / video.latency_ms
     """
     live_prefixes = ("safety.", "guidance.", "detector.", "estimator.")
+    # 例外：換權重檔要重新載入模型，apply_live_config 只改閾值不換模型，
+    # 所以 detector.weights 確實需要重啟，標 ⟳ 是正確的。
+    restart_required = {"detector.weights"}
     # 抓出每個 field 物件的 path 與其 hint 是否含 ⟳
     for block in re.findall(r"\{[^{}]*path:\s*[^{}]*\}", APP_JS):
         m = re.search(r"""path:\s*["']([a-zA-Z0-9_.]+)["']""", block)
         if not m:
             continue
         path = m.group(1)
+        if path in restart_required:
+            continue
         needs_restart = "⟳" in block
         if path.startswith(live_prefixes) or path == "video.latency_ms":
             assert not needs_restart, (
                 f"{path} 已由 apply_live_config 熱套用，不該標 ⟳（會誤導操作員重啟）"
             )
+
+
+def test_weights_switch_requires_restart():
+    """換模型必須標 ⟳：apply_live_config 不會重新載入權重檔，
+    不標的話操作員會以為切好了、實際還在跑舊模型——而模型間完全不通用
+    （實測：玩具車模型對真車偵測數 44→0），這種誤解會直接毀掉任務。"""
+    block = next(b for b in re.findall(r"\{[^{}]*path:\s*[^{}]*\}", APP_JS)
+                 if 'detector.weights' in b)
+    assert "⟳" in block, "detector.weights 需要重啟才生效，必須標 ⟳"

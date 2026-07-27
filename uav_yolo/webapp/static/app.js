@@ -391,6 +391,11 @@ const FIELDS = [
   { path: "video.latency_ms", label: "圖傳延遲 ms", type: "number",
     hint: "曝光→本機收到的固定延遲。未補償會有「延遲×飛行速度」的測地偏移（20m/s×300ms=6m）。鏡頭拍手機碼錶可量" },
   { sec: "偵測" },
+  // 選項在 loadSettings 依 weights/ 目錄動態填入
+  { path: "detector.weights", label: "偵測模型", type: "select", options: [],
+    dynamic: "weights",
+    hint: "⚠ 各模型只認自己訓練過的目標：玩具車模型偵測不到真車，空拍模型也偵測不到玩具車。"
+        + "換場景一定要換模型 ⟳" },
   { path: "detector.conf", label: "信心閾值", type: "number", step: 0.05, hint: "0.3~0.7，低=多框、高=少框" },
   { path: "detector.lock_mode", label: "鎖定方式", type: "select",
     options: [["auto", "自動（最大目標連續幀）"], ["manual", "手動（UI 點選）"]] },
@@ -470,6 +475,15 @@ async function loadSettings() {
       return;
     }
     const value = getPath(cfg, f.path);
+    // 動態選項：模型清單由伺服器列出 weights/ 目錄提供
+    if (f.dynamic === "weights") {
+      const list = (data.meta && data.meta.weights) || [];
+      f = Object.assign({}, f, {
+        options: list.length
+          ? list.map((w) => [w.path, `${w.name}${w.note ? "  — " + w.note : ""}`])
+          : [[value || "weights/best.pt", "（weights/ 目錄沒有 .pt 檔）"]],
+      });
+    }
     const row = document.createElement("div");
     row.className = "cfg-row";
     let ctrl = "";

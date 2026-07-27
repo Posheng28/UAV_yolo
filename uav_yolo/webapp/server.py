@@ -177,6 +177,32 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     # ---------------- 設定 ----------------
 
+    # 已知權重的用途說明（下拉選單顯示用）。實測結論見 integration/TRAIN_YOUR_TARGET.md：
+    # 只用玩具車微調的模型會 100% 遺忘真車（44→0），所以必須保留多個模型切換。
+    WEIGHT_NOTES = {
+        "toycar.pt": "室內玩具車（自訓）— 真車無效",
+        "best.pt": "空拍真車（自訓）— 玩具車無效",
+        "yolo26n.pt": "COCO 通用 nano — 真實車輛/行人等 80 類",
+        "yolo11s.pt": "COCO 通用 small — 較準但較慢",
+    }
+
+    def _list_weights() -> list[dict]:
+        wdir = PROJECT_ROOT / "weights"
+        out = []
+        if wdir.is_dir():
+            for p in sorted(wdir.glob("*.pt")):
+                out.append({
+                    "path": f"weights/{p.name}",
+                    "name": p.name,
+                    "size_mb": round(p.stat().st_size / 1e6, 1),
+                    "note": WEIGHT_NOTES.get(p.name, ""),
+                })
+        return out
+
+    @app.get("/api/weights")
+    def list_weights():
+        return {"weights": _list_weights()}
+
     @app.get("/api/config")
     def get_config():
         weights = cfg.get("detector.weights") or DEFAULT_WEIGHTS_FILE
@@ -188,6 +214,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 "weights_exists": weights_exists,
                 "calibrated": intrinsics.exists(),
                 "devices": list_video_devices(),
+                "weights": _list_weights(),   # 供設定頁做模型下拉選單
             },
         }
 

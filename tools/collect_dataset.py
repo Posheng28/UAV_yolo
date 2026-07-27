@@ -28,8 +28,10 @@ import cv2
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="從實機影像收集訓練圖")
-    ap.add_argument("--url", default="http://localhost:8610/frame.jpg",
-                    help="地面站的單幀端點（需先啟動 run.py 且為實機模式）")
+    # 一定要用 frame_raw：/frame.jpg 帶偵測框與狀態文字，
+    # 拿去訓練會讓模型學成「看到綠框就是車」。
+    ap.add_argument("--url", default="http://localhost:8610/frame_raw.jpg",
+                    help="地面站的『原始』單幀端點（無疊加層）")
     ap.add_argument("--out", default="data/toycar")
     ap.add_argument("--every", type=float, default=0.7, help="每幾秒存一張")
     ap.add_argument("--count", type=int, default=200, help="收集幾張")

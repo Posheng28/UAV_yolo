@@ -113,6 +113,24 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
+    @app.get("/frame_raw.jpg")
+    def frame_raw():
+        """未疊加的原始幀。**訓練資料一定要用這個**——
+        /frame.jpg 帶有偵測框與狀態文字，拿去訓練會讓模型學到
+        「綠框＝車」這種災難性關聯。"""
+        import cv2
+        from fastapi.responses import Response
+
+        engine = manager.engine
+        frame = engine.raw_frame() if engine else None
+        if frame is None:
+            return JSONResponse({"error": "no frame"}, status_code=503)
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            return JSONResponse({"error": "encode failed"}, status_code=500)
+        return Response(content=buf.tobytes(), media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
     @app.get("/stream.mjpg")
     def stream():
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"

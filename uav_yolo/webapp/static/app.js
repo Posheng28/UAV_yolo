@@ -118,14 +118,15 @@ function renderStatus(st) {
   }
   $("#target-info").innerHTML = tHtml;
 
-  // 偵測列表
+  // 偵測列表（顏色與畫面框一致：綠=偵測到、紅=已鎖定）
   $("#det-list").innerHTML = st.detections.length
     ? st.detections
         .map(
           (d) =>
             `<div class="det-item ${d.locked ? "locked" : ""}" data-id="${d.id}">
-               <span>#${d.id}</span><span>${d.cls}</span><span>${(d.conf * 100).toFixed(0)}%</span>
-               ${d.locked ? "<span>🔒 已鎖定</span>" : ""}
+               <span class="det-dot"></span>
+               <span><b>#${d.id}</b></span><span>${d.cls}</span><span>${(d.conf * 100).toFixed(0)}%</span>
+               ${d.locked ? "<span>🔒 已鎖定</span>" : "<span class='mut'>點擊鎖定</span>"}
              </div>`
         )
         .join("")
@@ -682,6 +683,36 @@ function startFramePoller(imgId, { fps = 12, lostId = null, staleMs = 2500 } = {
 }
 startFramePoller("stream", { fps: 12, lostId: "stream-lost" });
 startFramePoller("calib-stream", { fps: 10 });
+
+/* ---------------- 點畫面選取目標 ----------------
+   直接點框內即可鎖定，不必到列表找。座標要換算：
+   <img> 是縮放顯示的，點擊位置得換回原始幀像素才能跟 bbox 比對。 */
+function enableClickToLock(imgId) {
+  const img = document.getElementById(imgId);
+  if (!img) return;
+  img.addEventListener("click", (e) => {
+    if (!lastStatus || !lastStatus.detections || !lastStatus.detections.length) return;
+    // 縮放/平移後，用 getBoundingClientRect 直接算出點在圖上的相對位置
+    const r = img.getBoundingClientRect();
+    const nx = (e.clientX - r.left) / r.width;   // 0~1
+    const ny = (e.clientY - r.top) / r.height;
+    const W = img.naturalWidth || 1920, H = img.naturalHeight || 1080;
+    const px = nx * W, py = ny * H;
+
+    // 找出點到的框（多個重疊時取面積最小的，通常是使用者想選的那個）
+    let best = null, bestArea = Infinity;
+    for (const d of lastStatus.detections) {
+      const [x1, y1, x2, y2] = d.bbox;
+      if (px >= x1 && px <= x2 && py >= y1 && py <= y2) {
+        const area = (x2 - x1) * (y2 - y1);
+        if (area < bestArea) { best = d; bestArea = area; }
+      }
+    }
+    if (best) post("/api/lock", { track_id: best.id });
+  });
+  img.style.cursor = "crosshair";
+}
+enableClickToLock("stream");
 
 /* ---------------- 影像縮放（滾輪縮放/拖曳平移/雙擊還原） ---------------- */
 function makeZoomable(wrapId) {

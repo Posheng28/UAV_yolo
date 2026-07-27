@@ -508,18 +508,34 @@ class TrackerEngine:
             "COAST": (60, 170, 255),
             "LOST": (70, 70, 230),
         }
+        # 配色（BGR）：偵測到=綠框、已鎖定=紅框。灰框在雜亂地面上看不見，故不用。
+        GREEN, RED = (80, 220, 80), (60, 60, 235)
+        # 線寬隨畫面解析度縮放，1080p 才不會細到看不見
+        scale = max(frame.shape[1] / 960.0, 1.0)
+        thin, thick = max(int(2 * scale), 2), max(int(4 * scale), 3)
+        font_sc = 0.6 * scale
+
         for det in detections:
             x1, y1, x2, y2 = map(int, det.bbox)
             is_locked = locked_det is not None and det.track_id == locked_det.track_id
-            color = (80, 200, 80) if is_locked else (150, 150, 150)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3 if is_locked else 1)
-            cv2.putText(
-                frame, f"#{det.track_id} {det.cls_name} {det.conf:.2f}",
-                (x1, max(y1 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
-            )
+            color = RED if is_locked else GREEN
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick if is_locked else thin)
+
+            # ID 標籤：加深色底條，雜亂背景上也讀得到
+            label = f"#{det.track_id} {det.cls_name} {det.conf:.2f}"
+            if is_locked:
+                label += " LOCKED"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_sc, thin)
+            ly = max(y1 - int(8 * scale), th + int(6 * scale))
+            cv2.rectangle(frame, (x1, ly - th - int(6 * scale)),
+                          (x1 + tw + int(8 * scale), ly + int(4 * scale)), color, -1)
+            cv2.putText(frame, label, (x1 + int(4 * scale), ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_sc, (20, 20, 20), thin, cv2.LINE_AA)
+
             if is_locked:
                 u, v = map(int, det.ground_pixel)
-                cv2.circle(frame, (u, v), 5, (60, 60, 230), -1)
+                cv2.circle(frame, (u, v), max(int(6 * scale), 5), RED, -1)
+                cv2.circle(frame, (u, v), max(int(6 * scale), 5), (255, 255, 255), thin)
 
         color = state_colors.get(self.state, (200, 200, 200))
         cv2.putText(frame, f"STATE: {self.state}", (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)

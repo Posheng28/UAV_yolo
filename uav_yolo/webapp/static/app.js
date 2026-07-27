@@ -28,6 +28,18 @@ document.querySelectorAll(".tab").forEach((btn) => {
 /* ---------------- 儀表板：狀態輪詢 ---------------- */
 let lastStatus = null;
 
+// 伺服器 UI 指紋：伺服器更新重啟後指紋會變 → 自動整頁重載，
+// 永遠不會再出現「伺服器是新的、瀏覽器跑舊 JS」的狀況。
+let uiVersionSeen = null;
+function checkUiVersion(st) {
+  if (!st.ui_version) return;
+  if (uiVersionSeen === null) {
+    uiVersionSeen = st.ui_version;
+  } else if (st.ui_version !== uiVersionSeen) {
+    location.reload();
+  }
+}
+
 function fmt(v, digits = 1) {
   return v === null || v === undefined ? "—" : Number(v).toFixed(digits);
 }
@@ -39,6 +51,7 @@ function kvRow(k, v, cls = "") {
 async function poll() {
   try {
     const st = await api("/api/status");
+    checkUiVersion(st);
     lastStatus = st;
     renderStatus(st);
   } catch (e) {

@@ -27,6 +27,10 @@ def make_cfg(tmp_path, airframe: str) -> Config:
             "video": {"width": 960, "height": 540},
             "detector": {"lock_mode": "auto", "min_lock_frames": 6},
             "sim": {"patrol": False},  # 測試要「停了就穩定停住」觀察收斂，關掉巡邏
+            # 內參也要隔離：使用者做完相機校正後，config/camera_intrinsics.yaml 會存
+            # 真實鏡頭參數（1920x1080）。合成世界以 FOV 近似渲染，引擎若改用實機內參，
+            # 兩者不一致 → 測地整個錯位（實測差 ~490m），測試會莫名其妙失敗。
+            "camera": {"intrinsics_file": str(tmp_path / "no_such_intrinsics.yaml")},
         }
     )
     return cfg

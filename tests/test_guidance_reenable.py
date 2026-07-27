@@ -20,6 +20,7 @@ def make_engine(tmp_path, airframe="multirotor"):
         "vehicle": {"airframe": airframe},
         "video": {"width": 640, "height": 360},
         "sim": {"patrol": False},  # 這些測試依賴「目標會停」，關掉巡邏
+        "camera": {"intrinsics_file": str(tmp_path / "no_such_intrinsics.yaml")},
     })
     engine = build_sim_engine(cfg, realtime=False)
     return engine, engine.sim_world

@@ -38,6 +38,18 @@ from .checklist import Checklist
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _ui_version() -> str:
+    """UI 資產指紋（檔案 mtime 總和）。前端比對它，變了就自動重載頁面——
+    根治「伺服器更新了、瀏覽器還跑舊 JS」這類看過三次的災難。"""
+    total = 0
+    for f in STATIC_DIR.glob("*"):
+        try:
+            total ^= int(f.stat().st_mtime_ns) & 0xFFFFFFFF
+        except OSError:
+            pass
+    return f"{total:08x}"
+
+
 class EngineManager:
     """持有目前引擎；設定變更後可整組重建。"""
 
@@ -68,6 +80,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     app = FastAPI(title="UAV_yolo 地面站")
     app.state.manager = manager
+    ui_version = _ui_version()  # 啟動時定版；重啟後檔案有變=新指紋
 
     @app.on_event("startup")
     def _startup():
@@ -120,9 +133,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def status():
         engine = manager.engine
         if engine is None:
-            return {"ready": False}
+            return {"ready": False, "ui_version": ui_version}
         data = dataclasses.asdict(engine.status())
         data["ready"] = True
+        data["ui_version"] = ui_version
         return data
 
     @app.post("/api/guidance")

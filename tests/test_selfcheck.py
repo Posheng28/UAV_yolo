@@ -15,7 +15,9 @@ DT = 0.05
 def make_engine(tmp_path, **over):
     cfg = Config(local_path=tmp_path / "local.yaml")
     patch = {"system": {"mode": "sim"}, "video": {"width": 640, "height": 360},
-             "sim": {"patrol": False}}
+             "sim": {"patrol": False},
+             # 隔離使用者的實機相機校正檔（見 test_sim_e2e 說明）
+             "camera": {"intrinsics_file": str(tmp_path / "no_intr.yaml")}}
     patch.update(over)
     cfg.update(patch)
     engine = build_sim_engine(cfg, realtime=False)

@@ -16,7 +16,8 @@ from uav_yolo.webapp.server import create_app
 def make_cfg(tmp_path) -> Config:
     cfg = Config(local_path=tmp_path / "local.yaml")
     cfg.update({"system": {"mode": "sim"}, "video": {"width": 640, "height": 360},
-                "sim": {"patrol": False}})
+                "sim": {"patrol": False},
+                "camera": {"intrinsics_file": str(tmp_path / "no_intr.yaml")}})
     return cfg
 
 

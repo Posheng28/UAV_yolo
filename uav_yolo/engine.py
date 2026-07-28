@@ -287,7 +287,12 @@ class TrackerEngine:
             if now_wall - getattr(self, "_last_idle_publish", 0.0) >= 0.5:
                 self._last_idle_publish = now_wall
                 try:
-                    self._publish_status(self.clock(), [], None)
+                    # 位置要照樣從遙測取，不能傳 None：否則採集卡沒插時儀表板會顯示
+                    # 「無 GPS 位置」，但飛控其實定位得好好的——那正是這段程式要
+                    # 避免的誤導，只是先前漏了位置這一項。
+                    clock_now = self.clock()
+                    self._publish_status(
+                        clock_now, [], self.link.store.position_at(clock_now))
                 except Exception:
                     pass
             return False

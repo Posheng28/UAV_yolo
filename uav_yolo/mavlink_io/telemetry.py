@@ -522,20 +522,31 @@ class MavlinkConnection:
     ) -> None:
         """DO_REPOSITION：旋翼=飛到點懸停；固定翼=以 NAV_LOITER_RAD（或 param3）繞行。
 
-        alt_rel_m 僅供 LR24 後端用相對 home 高度；MAVLink 直連用 alt_amsl，故忽略。
+        高度一律用「相對 home」座標框送 alt_rel_m，**不要自己算 AMSL**。
+
+        原因（實機量到）：飛控的 home 高度與它當下的高度估計可能是不同基準——
+        home 來自 GPS（134.5m），目前高度來自氣壓計（-0.5m），差了 135m。
+        若照 `home_alt_amsl + alt_rel_m` 算成 AMSL 送出去，飛控會拿它跟自己
+        （差 135m 的）高度估計相比，**設定 4m 會變成叫它爬 139m**。
+        改用 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT 就由飛控自己用一致的 home 基準
+        換算，這個落差整個消失。已對真機驗證 ACCEPTED。
+
+        alt_amsl 保留在簽名裡供其他後端/記錄使用，MAVLink 直連這條不再用它。
         """
-        MAV_FRAME_GLOBAL_INT = 5
+        MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
         MAV_CMD_DO_REPOSITION = 192
         MAV_DO_REPOSITION_FLAGS_CHANGE_MODE = 1
+        if alt_rel_m is None:
+            raise ValueError("send_reposition 需要 alt_rel_m（相對 home 高度）")
         radius = float(loiter_radius_m) if loiter_radius_m else float("nan")
         yaw_param = (1.0 if loiter_ccw else 0.0) if loiter_radius_m else float("nan")
         self._command_int(
-            MAV_FRAME_GLOBAL_INT, MAV_CMD_DO_REPOSITION,
+            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, MAV_CMD_DO_REPOSITION,
             -1.0,                                  # p1 地速：預設
             MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,   # p2 切到 Hold 執行
             radius,                                # p3 定翼繞行半徑（部分版本支援，否則用 NAV_LOITER_RAD）
             yaw_param,                             # p4 定翼繞向 0=CW 1=CCW
-            round(lat * 1e7), round(lon * 1e7), alt_amsl,
+            round(lat * 1e7), round(lon * 1e7), float(alt_rel_m),
         )
 
     def send_roi_location(self, lat: float, lon: float, alt_amsl: float) -> None:

@@ -62,6 +62,33 @@ def test_detector_error_clears_once_detection_recovers(tmp_path):
     assert engine.status().detector_error is None
 
 
+def test_telemetry_position_still_shown_when_video_is_down(tmp_path):
+    """採集卡沒插時，儀表板仍要顯示飛控回報的 GPS 位置。
+
+    實機遇到：影像來源斷線 → 閒置狀態發布把位置寫成 None → 畫面顯示
+    「無 GPS 位置」，但飛控其實 20 幾顆星定位良好。這種假象會讓操作員
+    往完全錯的方向查（以為 GPS 掛了，實際上只是相機沒插）。
+    """
+    engine = make_engine(tmp_path)
+    engine.sim_world.step(0.05)
+    engine.step()                                  # 先跑一幀，讓遙測有位置
+    assert engine.status().vehicle["has_fix"] is True
+
+    class DeadVideo:
+        def get_frame(self):
+            return None, 0.0
+
+        def stop(self):
+            pass
+
+    engine.video = DeadVideo()
+    engine._last_idle_publish = 0.0
+    assert engine.step() is False                  # 沒有新影像
+    v = engine.status().vehicle
+    assert v["has_fix"] is True, "影像斷線就把 GPS 位置報成沒有，會誤導排查方向"
+    assert v["lat"] is not None and v["lon"] is not None
+
+
 def test_step_exception_does_not_kill_the_loop_thread(tmp_path):
     """_run 必須擋住 step 的例外——執行緒死了 UI 是看不出來的。"""
     engine = make_engine(tmp_path)

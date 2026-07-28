@@ -267,6 +267,8 @@ class MavlinkConnection:
         self.raw_bytes = 0
         self.msgs_parsed = 0
         self.heartbeats_seen = 0
+        self.gcs_heartbeats_sent = 0   # 我們發出去的；0 代表 PX4 會判定鏈路中斷
+        self._last_hb_sent_t = 0.0
         self.hb_wrong_comp = 0  # 收到心跳但來自非自駕儀元件（雲台/相機）
 
     # ---- 生命週期 ----
@@ -322,6 +324,7 @@ class MavlinkConnection:
                     break
                 self._try_open()
                 continue
+            self._send_gcs_heartbeat()
             try:
                 msg = self._conn.recv_match(blocking=True, timeout=0.2)
             except Exception as exc:
@@ -429,6 +432,40 @@ class MavlinkConnection:
                 text = str(text).rstrip("\x00").strip()
                 if text:
                     self.store.push_message(now, int(msg.severity), text)
+
+    GCS_HEARTBEAT_INTERVAL_S = 1.0
+
+    def _send_gcs_heartbeat(self) -> None:
+        """以 ~1Hz 發送 GCS 心跳。
+
+        MAVLink 規定每個節點都要週期性發心跳，這是對方判斷「連線還在」的唯一
+        依據。少了它，PX4 一收到我們的指令就登記「有地面站」，接著立刻認定
+        **資料鏈路中斷**（COM_DL_LOSS_T）→ 進入 failsafe → **拒絕解鎖**。
+
+        症狀非常反直覺，實機上就是這樣呈現的：
+            完全不接數傳          → 可以 arm（PX4 從沒看過地面站）
+            接上本地面站          → 不能 arm（看過地面站，但心跳沒了＝斷線）
+            接上 QGC              → 可以 arm（QGC 有乖乖發心跳）
+        只讀不寫的監看程式一樣要發心跳，「我只是聽而已」不是豁免理由。
+        """
+        if self._conn is None:
+            return
+        now = time.monotonic()
+        if now - self._last_hb_sent_t < self.GCS_HEARTBEAT_INTERVAL_S:
+            return
+        self._last_hb_sent_t = now
+        try:
+            from pymavlink import mavutil
+
+            with self._send_lock:
+                self._conn.mav.heartbeat_send(
+                    mavutil.mavlink.MAV_TYPE_GCS,
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    0, 0, mavutil.mavlink.MAV_STATE_ACTIVE,
+                )
+            self.gcs_heartbeats_sent += 1
+        except Exception:
+            pass  # 心跳送不出去不該拖垮接收迴圈；斷線由讀取那側處理
 
     def _request_intervals(self) -> None:
         """跟飛控要固定頻率的訊息（SET_MESSAGE_INTERVAL）。"""

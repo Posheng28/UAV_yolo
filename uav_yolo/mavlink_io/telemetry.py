@@ -479,8 +479,34 @@ class MavlinkConnection:
         except Exception:
             pass  # 心跳送不出去不該拖垮接收迴圈；斷線由讀取那側處理
 
+    # 我們一項也不用、但 PX4 預設會一直送的訊息。實測 LR24 @115200 上，
+    # 要求的串流只拿得到約 37%（ATTITUDE 要 10Hz 只來 3.7Hz），因為頻寬被這些吃掉。
+    # 姿態頻率直接決定測地品質——要用它內插「拍攝當下」的姿態，270ms 一筆太粗。
+    # SET_MESSAGE_INTERVAL 是分鏈路生效的，關掉不影響 QGC 走 USB 的那條。
+    UNUSED_MSG_IDS = {
+        31: "ATTITUDE_QUATERNION",      # 我們用 ATTITUDE 的尤拉角
+        74: "VFR_HUD",
+        65: "RC_CHANNELS",
+        36: "SERVO_OUTPUT_RAW",
+        85: "POSITION_TARGET_LOCAL_NED",
+        83: "ATTITUDE_TARGET",
+        42: "MISSION_CURRENT",
+        29: "SCALED_PRESSURE",
+        141: "ALTITUDE",               # 高度我們用 GLOBAL_POSITION_INT
+        32: "LOCAL_POSITION_NED",
+    }
+
+    def _disable_unused_streams(self) -> None:
+        """關掉用不到的串流，把頻寬讓給姿態與位置。
+
+        interval = -1 表示停送（MAV_CMD_SET_MESSAGE_INTERVAL 的約定）。
+        """
+        for msg_id in self.UNUSED_MSG_IDS:
+            self._command_long(511, msg_id, -1)
+
     def _request_intervals(self) -> None:
         """跟飛控要固定頻率的訊息（SET_MESSAGE_INTERVAL）。"""
+        self._disable_unused_streams()
         name_to_id = {
             "ATTITUDE": MSG_ID_ATTITUDE,
             "GLOBAL_POSITION_INT": MSG_ID_GLOBAL_POSITION_INT,

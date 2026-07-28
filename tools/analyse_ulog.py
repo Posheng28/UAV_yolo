@@ -85,6 +85,41 @@ def report_params(ulog: ULog) -> None:
         print(f"  {name:<16} {v:<10}{label}{extra}")
 
 
+def rel_time(ts: np.ndarray, t0: int) -> np.ndarray:
+    """相對開機時間（秒）。
+
+    timestamp 是無號整數，某些主題第一筆是 0；直接減 t0 會下溢成
+    1.8e13 秒這種天文數字，看起來像資料壞掉，其實只是型別問題。
+    """
+    return (ts.astype(np.int64) - int(t0)) / 1e6
+
+
+def flight_summary(ulog: ULog, t0: int) -> str:
+    """這份 log 到底有沒有真的飛？用高度變化與落地狀態判斷，不靠檔名或記憶。"""
+    lp = None
+    for d in ulog.data_list:
+        if d.name == "vehicle_local_position" and d.multi_id == 0:
+            lp = d
+            break
+    if lp is None or "z" not in lp.data:
+        return "無高度資料"
+    z = lp.data["z"][np.isfinite(lp.data["z"])]
+    if z.size == 0:
+        return "無高度資料"
+    climb = float(z.max() - z.min())          # z 向下為正，變化量即高度範圍
+    vs = None
+    for d in ulog.data_list:
+        if d.name == "vehicle_status":
+            vs = d
+            break
+    airborne = ""
+    if vs is not None and "takeoff_time" in vs.data:
+        tk = vs.data["takeoff_time"]
+        airborne = "，有起飛紀錄" if np.any(tk > 0) else "，無起飛紀錄"
+    verdict = "✈️ 有實際飛行" if climb > 1.0 else "🅿️ 未離地（地面通電）"
+    return f"{verdict}（高度變化 {climb:.2f} m{airborne}）"
+
+
 def get(ulog: ULog, name: str, idx: int = 0):
     for d in ulog.data_list:
         if d.name == name and d.multi_id == idx:
@@ -110,6 +145,7 @@ def analyse(path: Path) -> None:
     t0 = u.start_timestamp
     print("=" * 72)
     print(f"{path.name}   時長 {(u.last_timestamp - t0)/1e6:.0f} 秒")
+    print(f"  {flight_summary(u, t0)}")
     print("=" * 72)
 
     report_params(u)
@@ -129,7 +165,7 @@ def analyse(path: Path) -> None:
     # ---- 模式歷程 ----
     vs = get(u, "vehicle_status")
     if vs:
-        t = (vs.data["timestamp"] - t0) / 1e6
+        t = rel_time(vs.data["timestamp"], t0)
         nav = vs.data.get("nav_state")
         if nav is not None:
             changes = [0] + list(np.flatnonzero(np.diff(nav)) + 1)

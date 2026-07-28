@@ -675,6 +675,9 @@ class TrackerEngine:
                 "armed": hb.armed if hb else False,
                 "link_ok": store.link_alive(now, self.gates.link_timeout_s),
                 "home_set": store.home is not None,
+                # 飛控自己講的話。「Arming denied: ...」只會出現在這裡，
+                # 沒有它操作員只能面對「就是不能 arm」而毫無線索。
+                "messages": store.recent_messages() if hasattr(store, "recent_messages") else [],
             },
             target=target,
             gates=list(self.gate_report_blocked),

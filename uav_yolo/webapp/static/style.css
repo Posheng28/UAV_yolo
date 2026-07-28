@@ -141,6 +141,16 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
   background: var(--amber-soft, #fdf0d5); color: var(--amber, #a15c00); font-weight: 700;
 }
 
+/* 飛控 STATUSTEXT：拒絕 arm 的理由等，字要看得清楚 */
+.fc-msgs { grid-column: 1 / -1; margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.fc-msg {
+  font-size: .88rem; padding: 4px 8px; border-radius: 6px;
+  background: var(--sky-soft); color: var(--ink);
+  white-space: normal; word-break: break-word;
+}
+.fc-msg.sev-warn { background: var(--amber-soft, #fdf0d5); color: var(--amber, #a15c00); }
+.fc-msg.sev-err { background: var(--red-soft); color: var(--red); font-weight: 700; }
+
 /* ---------- 資訊區 ---------- */
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: .95rem; }
 .kv .k { color: var(--mut); white-space: nowrap; }

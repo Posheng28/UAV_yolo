@@ -153,6 +153,14 @@ function renderStatus(st) {
           `送${st.mavlink.lr24.sent} ACK${st.mavlink.lr24.ack} ERR${st.mavlink.lr24.err}` +
           (st.mavlink.lr24.ready_for_goto === true ? "・可 GOTO" : st.mavlink.lr24.ready_for_goto === false ? "・未就緒" : ""),
           st.mavlink.lr24.connected ? "good" : "bad")
+      : "") +
+    // 飛控自己的訊息（PX4 STATUSTEXT）。「Arming denied: ...」只從這裡來，
+    // 不顯示的話操作員面對的就只是「就是不能 arm」，毫無線索可查。
+    ((v.messages && v.messages.length)
+      ? `<div class="fc-msgs"><div class="mut small">飛控訊息</div>` +
+        v.messages.slice(0, 5).map((m) =>
+          `<div class="fc-msg${m.severity <= 3 ? " sev-err" : m.severity <= 4 ? " sev-warn" : ""}">${m.text}</div>`
+        ).join("") + `</div>`
       : "");
 
   // 影像資訊

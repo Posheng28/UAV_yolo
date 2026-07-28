@@ -105,7 +105,9 @@ def test_status_payload_contains_fields_frontend_reads(tmp_path):
     # 巢狀欄位：前端直接取用，缺了就顯示 undefined
     for key in ("connected", "fps", "device", "error"):
         assert key in payload["video"], f"video 缺 {key}"
-    for key in ("mode", "armed", "link_ok", "rel_alt", "home_set"):
+    for key in ("mode", "armed", "link_ok", "rel_alt", "home_set", "messages"):
+        # messages = 飛控 STATUSTEXT。「Arming denied: ...」只從這裡來，
+        # 少了它操作員面對的只有「就是不能 arm」，沒有任何線索
         assert key in payload["vehicle"], f"vehicle 缺 {key}"
     for key in ("present", "control", "has_feedback"):
         assert key in payload["gimbal"], f"gimbal 缺 {key}"

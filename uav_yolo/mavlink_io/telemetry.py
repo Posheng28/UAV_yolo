@@ -145,12 +145,29 @@ class TelemetryStore:
         self.gps: GpsSample | None = None
         self.landed: LandedSample | None = None
         self.last_msg_t: float | None = None
+        # 飛控自己講的話（STATUSTEXT）。「為什麼拒絕 arm」只會從這裡出來，
+        # 不解析等於把飛控唯一的解釋管道丟掉，操作員只能面對「就是不能 arm」。
+        self.messages: deque[tuple[float, int, str]] = deque(maxlen=40)
 
     def _trim(self, buf: deque, now: float) -> None:
         while buf and now - buf[0].t > self.history_s:
             buf.popleft()
 
     # ---- 寫入 ----
+
+    def push_message(self, t: float, severity: int, text: str) -> None:
+        """收下飛控的 STATUSTEXT；同一句連續重複只留最新一筆（PX4 會狂洗同一則）。"""
+        with self._lock:
+            if self.messages and self.messages[-1][2] == text:
+                self.messages[-1] = (t, severity, text)
+            else:
+                self.messages.append((t, severity, text))
+            self.last_msg_t = t
+
+    def recent_messages(self, limit: int = 8) -> list[dict]:
+        with self._lock:
+            items = list(self.messages)[-limit:]
+        return [{"t": t, "severity": sev, "text": txt} for t, sev, txt in reversed(items)]
 
     def push_attitude(self, s: AttitudeSample) -> None:
         with self._lock:
@@ -403,6 +420,15 @@ class MavlinkConnection:
 
             elif mtype == "COMMAND_ACK":
                 self.last_ack[msg.command] = (msg.result, now)
+
+            elif mtype == "STATUSTEXT":
+                # 飛控拒絕 arm 的理由（"Arming denied: ..."）只從這裡來。
+                text = msg.text
+                if isinstance(text, (bytes, bytearray)):
+                    text = text.decode("utf-8", "replace")
+                text = str(text).rstrip("\x00").strip()
+                if text:
+                    self.store.push_message(now, int(msg.severity), text)
 
     def _request_intervals(self) -> None:
         """跟飛控要固定頻率的訊息（SET_MESSAGE_INTERVAL）。"""

@@ -54,11 +54,19 @@ def build_class_filter(model_names: dict[int, str], allowed: list[str]) -> set[i
 class Detector:
     """ultralytics YOLO 包裝：延遲載入、類別過濾、穩定 ID 指派。"""
 
-    def __init__(self, weights: str, conf: float, imgsz: int, class_names: list[str]):
+    def __init__(self, weights: str, conf: float, imgsz: int, class_names: list[str],
+                 tiling: str = "off", tile_grid: tuple[int, int] | None = None,
+                 tile_overlap: float = 0.2):
         self.weights_path = self._resolve_weights(weights)
         self.conf = float(conf)
         self.imgsz = int(imgsz)
         self.allowed_names = class_names
+        # 切塊推論：小目標的救命稻草。實測 8m 等效高度下整幀 0%、切塊 88%。
+        # 詳見 tiling.py 開頭的量測表。
+        self.tiling = tiling            # off | auto | on
+        self.tile_grid = tile_grid
+        self.tile_overlap = float(tile_overlap)
+        self._last_boxes: list[tuple[float, float, float, float]] = []
         self.assigner = StableIdAssigner()
         self.backend_name = "ultralytics"
         self.provider: str | None = None       # ONNX 時是實際的 execution provider
@@ -119,11 +127,9 @@ class Detector:
         self.imgsz = value
         return None
 
-    def detect(self, frame, t: float | None = None) -> list[Detection]:
-        """偵測本幀並回傳帶穩定 ID 的框；t 為該幀時間戳（秒），供速度外推用。"""
+    def _raw_detect(self, frame) -> tuple[list, list]:
+        """對一張影像做一次推論，回傳 (bbox 串列, [(類別名, 信心)])。"""
         model = self._ensure_model()
-        stamp = time.monotonic() if t is None else float(t)
-
         boxes: list[tuple[float, float, float, float]] = []
         meta: list[tuple[str, float]] = []
         if self.is_onnx:
@@ -148,6 +154,55 @@ class Detector:
                     x1, y1, x2, y2 = map(float, box.xyxy[0])
                     boxes.append((x1, y1, x2, y2))
                     meta.append((str(names.get(cls_id, cls_id)), float(box.conf[0])))
+        return boxes, meta
+
+    def _model_input_hw(self) -> tuple[int, int]:
+        """模型實際吃的輸入尺寸。ONNX 是匯出時固定的；.pt 走 rect letterbox。"""
+        if self.is_onnx and self._model is not None:
+            return self._model.input_hw
+        return (int(self.imgsz * 9 / 16), int(self.imgsz))   # 16:9 來源的 rect 尺寸
+
+    def _effective_grid(self, frame_w: int, frame_h: int) -> tuple[int, int]:
+        """tile_grid 為 None（auto）時，從模型輸入尺寸推出不會縮小的最小格數。"""
+        from . import tiling
+
+        if self.tile_grid is not None:
+            return self.tile_grid
+        ih, iw = self._model_input_hw()
+        return tiling.auto_grid(frame_w, frame_h, iw, ih, self.tile_overlap)
+
+    def _tiled_detect(self, frame) -> tuple[list, list]:
+        """整幀 + 各切塊都推論後合併。
+
+        整幀那一次不能省：目標夠大時會被切線切斷（實測從 100% 掉到 52%），
+        兩者取聯集再去重才是穩健的做法。
+        """
+        from . import tiling
+
+        h, w = frame.shape[:2]
+        boxes, meta = self._raw_detect(frame)          # 整幀
+        items = [(b, m[0], m[1]) for b, m in zip(boxes, meta)]
+
+        nx, ny = self._effective_grid(w, h)
+        for x0, y0, tw, th in tiling.tile_rects(w, h, nx, ny, self.tile_overlap):
+            tb, tm = self._raw_detect(frame[y0:y0 + th, x0:x0 + tw])
+            for b, m in zip(tiling.offset_boxes(tb, x0, y0), tm):
+                items.append((b, m[0], m[1]))
+
+        merged = tiling.merge_detections(items)
+        return [it[0] for it in merged], [(it[1], it[2]) for it in merged]
+
+    def detect(self, frame, t: float | None = None) -> list[Detection]:
+        """偵測本幀並回傳帶穩定 ID 的框；t 為該幀時間戳（秒），供速度外推用。"""
+        from . import tiling
+
+        stamp = time.monotonic() if t is None else float(t)
+        use_tiles = self.tiling == "on" or (
+            self.tiling == "auto"
+            and tiling.should_tile(self._last_boxes, frame.shape[1])
+        )
+        boxes, meta = self._tiled_detect(frame) if use_tiles else self._raw_detect(frame)
+        self._last_boxes = list(boxes)
 
         sids = self.assigner.assign(boxes, stamp)
         return [

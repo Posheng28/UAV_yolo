@@ -52,6 +52,17 @@ class LastCommand:
     radius: float | None = None
 
 
+def _tile_grid(det_cfg: dict) -> tuple[int, int] | None:
+    """切塊格數；0 或未設 = auto（由模型輸入尺寸推算，見 tiling.auto_grid）。
+
+    寫死格數很危險：塊若比模型輸入大就會被縮小，切了反而更糟
+    （實測 3x2 在 960x544 輸入下偵測率 10%，改 auto 推出的 3x3 是 80%）。
+    """
+    cols = int(det_cfg.get("tile_cols", 0) or 0)
+    rows = int(det_cfg.get("tile_rows", 0) or 0)
+    return (cols, rows) if cols > 0 and rows > 0 else None
+
+
 @dataclass
 class EngineStatus:
     """給 Web UI 的快照（engine.status() 序列化）。"""
@@ -234,6 +245,10 @@ class TrackerEngine:
         # imgsz 只是 predict 的參數、不必重載模型，但漏掉它會讓設定頁改了沒反應
         # （UI 又沒標 ⟳）＝靜默失效。而它直接決定迴圈速率：CPU 推論下
         # 1280 需 304ms/幀（3.3Hz）、640 只要 167ms（6Hz）。
+        if hasattr(self.detector, "tiling"):
+            self.detector.tiling = det_cfg.get("tiling", "off")
+            self.detector.tile_grid = _tile_grid(det_cfg)
+            self.detector.tile_overlap = float(det_cfg.get("tile_overlap", 0.2))
         if hasattr(self.detector, "set_imgsz"):
             # ONNX 是靜態尺寸，套不上時要把原因回報到 UI，不能默默忽略
             reason = self.detector.set_imgsz(int(det_cfg.get("imgsz", 640)))
@@ -758,6 +773,9 @@ def create_engine(cfg: Config) -> TrackerEngine:
         conf=det_cfg.get("conf", 0.55),
         imgsz=det_cfg.get("imgsz", 640),
         class_names=det_cfg.get("class_names", []),
+        tiling=det_cfg.get("tiling", "off"),
+        tile_grid=_tile_grid(det_cfg),
+        tile_overlap=float(det_cfg.get("tile_overlap", 0.2)),
     )
     video = VideoSource(cfg.section("video"))
     telemetry = MavlinkConnection(

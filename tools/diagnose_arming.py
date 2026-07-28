@@ -120,7 +120,11 @@ def main() -> int:
                     help="讀取與 arm 相關的飛控參數（電池校正/門檻/斷路器）")
     ap.add_argument("--no-heartbeat", action="store_true",
                     help="不發 GCS 心跳（對照組：重現「PX4 判定鏈路中斷而拒絕 arm」）")
+    ap.add_argument("--arm-cycle", action="store_true",
+                    help="解鎖 → 確認 → 主動上鎖的完整循環（比等 10 秒自動上鎖安全）")
     args = ap.parse_args()
+    if args.arm_cycle:
+        args.try_arm = True
 
     print(f">>> 連線 {args.port} @ {args.baud}")
     m = mavutil.mavlink_connection(args.port, baud=args.baud, source_system=255)
@@ -149,6 +153,8 @@ def main() -> int:
     t0 = time.monotonic()
     deadline = t0 + args.seconds
     arm_sent_at = None
+    armed_at = None
+    disarm_sent_at = None
     ack = None
     last_hb = 0.0
     print(f">>> GCS 心跳：{'不發（對照組）' if args.no_heartbeat else '每秒 1 次'}\n")
@@ -198,7 +204,22 @@ def main() -> int:
                    "EXTENDED_SYS_STATE"):
             latest[t] = msg
         elif t == "HEARTBEAT" and msg.get_srcComponent() == 1:
+            was = armed_now
             armed_now = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            if armed_now and not was:
+                armed_at = time.monotonic()
+                print(f"  ★ 心跳確認：已解鎖（+{armed_at - t0:.1f}s）")
+            elif was and not armed_now:
+                print(f"  ★ 心跳確認：已上鎖（+{time.monotonic() - t0:.1f}s）")
+
+        # 解鎖確認後立刻主動上鎖，不要讓馬達空轉等 COM_DISARM_PRFLT
+        if (args.arm_cycle and armed_now and armed_at is not None
+                and disarm_sent_at is None and time.monotonic() - armed_at > 2.0):
+            print(">>> 送出上鎖指令（param1=0）…")
+            m.mav.command_long_send(m.target_system, m.target_component,
+                                    400, 0, 0, 0, 0, 0, 0, 0, 0)
+            disarm_sent_at = time.monotonic()
+            deadline = max(deadline, disarm_sent_at + 5.0)
 
     print("\n" + "=" * 66)
     print(f"收到的訊息種類：" + "  ".join(f"{k}×{v}" for k, v in sorted(counts.items())))

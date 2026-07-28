@@ -548,31 +548,34 @@ class MavlinkConnection:
     ) -> None:
         """DO_REPOSITION：旋翼=飛到點懸停；固定翼=以 NAV_LOITER_RAD（或 param3）繞行。
 
-        高度一律用「相對 home」座標框送 alt_rel_m，**不要自己算 AMSL**。
+        🔴 高度**必須送 AMSL**，不能送相對 home 高度。
 
-        原因（實機量到）：飛控的 home 高度與它當下的高度估計可能是不同基準——
-        home 來自 GPS（134.5m），目前高度來自氣壓計（-0.5m），差了 135m。
-        若照 `home_alt_amsl + alt_rel_m` 算成 AMSL 送出去，飛控會拿它跟自己
-        （差 135m 的）高度估計相比，**設定 4m 會變成叫它爬 139m**。
-        改用 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT 就由飛控自己用一致的 home 基準
-        換算，這個落差整個消失。已對真機驗證 ACCEPTED。
+        PX4 的 navigator 根本不看座標框，param7 一律當成 AMSL
+        （v1.17.0 `navigator_main.cpp`：
+            rep->current.alt = PX4_ISFINITE(cmd.param7) ? cmd.param7 : ...
+         沒有任何 frame 判斷，也不加 home 高度）。
 
-        alt_amsl 保留在簽名裡供其他後端/記錄使用，MAVLink 直連這條不再用它。
+        我一度改成用 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT 直接送 4.0，飛控回
+        ACCEPTED——但 **ACCEPTED 只代表指令被收下，不代表高度被照我的意思解讀**。
+        實際效果是「飛到海拔 4 公尺」，在地面高程 113m 的場地等於往地下 109m。
+        這條指令上的座標框是裝飾品，唯一的真相是 param7 = AMSL。
+
+        home 與當下高度基準不一致（曾實測差 135m）**不能靠換座標框解決**——
+        那是 EKF2_HGT_REF 指到不存在的測距儀造成的設定錯誤。正確做法是
+        偵測到基準不一致就拒發，見 engine._altitude_reference_sane()。
         """
-        MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
+        MAV_FRAME_GLOBAL_INT = 5
         MAV_CMD_DO_REPOSITION = 192
         MAV_DO_REPOSITION_FLAGS_CHANGE_MODE = 1
-        if alt_rel_m is None:
-            raise ValueError("send_reposition 需要 alt_rel_m（相對 home 高度）")
         radius = float(loiter_radius_m) if loiter_radius_m else float("nan")
         yaw_param = (1.0 if loiter_ccw else 0.0) if loiter_radius_m else float("nan")
         self._command_int(
-            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, MAV_CMD_DO_REPOSITION,
+            MAV_FRAME_GLOBAL_INT, MAV_CMD_DO_REPOSITION,
             -1.0,                                  # p1 地速：預設
             MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,   # p2 切到 Hold 執行
             radius,                                # p3 定翼繞行半徑（部分版本支援，否則用 NAV_LOITER_RAD）
             yaw_param,                             # p4 定翼繞向 0=CW 1=CCW
-            round(lat * 1e7), round(lon * 1e7), float(alt_rel_m),
+            round(lat * 1e7), round(lon * 1e7), float(alt_amsl),
         )
 
     def send_roi_location(self, lat: float, lon: float, alt_amsl: float) -> None:

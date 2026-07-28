@@ -473,6 +473,36 @@ class TrackerEngine:
         merged.update(self.cfg.section("safety").get(self.airframe) or {})
         return merged
 
+    ALT_REFERENCE_TOLERANCE_M = 10.0
+
+    def _altitude_reference_sane(self, pos) -> str | None:
+        """home 高度與飛控自己的高度估計是不是同一個基準？不是就回原因字串。
+
+        DO_REPOSITION 的 param7 被 PX4 當成 AMSL，而我們送的是
+        `home_alt_amsl + 設定的相對高度`。這只有在「home 高度」與「飛控當下的
+        AMSL 高度」出自同一個基準時才成立。
+
+        實機踩過：EKF2_HGT_REF 指向沒安裝的測距儀，於是 home 是 GPS 基準
+        （113~140m）、EKF 高度是氣壓計基準（約 0m），兩者差 135m。此時
+        「跟隨高度 4m」算出來的指令會叫飛機爬 139m。
+
+        飛控自己有一致的答案可以對帳：`rel_alt` 就是它認為的「相對 home 高度」，
+        所以 (alt_amsl − home_alt_amsl) 應該等於 rel_alt。差太多就是基準不一致，
+        這時**任何**高度指令都不可信，寧可不發。
+        """
+        home = self.link.store.home
+        if home is None or pos is None:
+            return None
+        implied = float(pos.alt_amsl) - float(home.alt_amsl)
+        gap = abs(implied - float(pos.rel_alt))
+        if gap <= self.ALT_REFERENCE_TOLERANCE_M:
+            return None
+        return (
+            f"高度基準不一致：home {home.alt_amsl:.0f}m 與目前高度 {pos.alt_amsl:.0f}m "
+            f"相減得 {implied:+.0f}m，但飛控回報相對高度 {pos.rel_alt:+.0f}m（差 {gap:.0f}m）"
+            "——檢查 EKF2_HGT_REF 是否指向未安裝的感測器"
+        )
+
     def alt_clamp_warning(self) -> str | None:
         """導引高度會被安全上下限夾掉時的警告字串（沒被夾則回 None）。
 
@@ -523,6 +553,14 @@ class TrackerEngine:
             gps=getattr(store, "gps", None),
             landed=getattr(store, "landed", None),
         )
+        # 高度基準不一致時，送出去的 AMSL 高度會錯得離譜（實測可差 135m）。
+        # 這比任何安全門檻都優先——寧可完全不發，也不要發一個高度是錯的指令。
+        alt_ref_problem = self._altitude_reference_sane(
+            self.link.store.position_at(self._last_capture_t or now))
+        if alt_ref_problem:
+            report.blocked.append(alt_ref_problem)
+            report.ok = False
+
         self.gate_report_blocked = report.blocked
         if report.throttled and not report.blocked:
             # 中性說明，不進紅色阻擋清單

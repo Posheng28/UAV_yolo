@@ -108,8 +108,18 @@ safety:
   allowed_modes: ["AUTO.LOITER"]  # 只有載具在這些 PX4 模式才發導引指令；
                                   # 飛行員撥桿切出去=接管，立即閂鎖停發，需在 UI 重新啟用
   max_cmd_distance_m: 500.0  # 指令點離 home 的最大距離（圍欄）
-  min_cmd_alt_m: 20.0        # 指令高度下限（相對 home）
-  max_cmd_alt_m: 120.0       # 指令高度上限（相對 home）
+  # 高度上下限（相對 home）。以下為共用預設，可被 safety.<載體> 覆蓋。
+  # ⚠ 導引高度低於下限會被「夾」到下限——設定頁填 4m、下限 20m，飛機會飛 20m。
+  #    系統會在儀表板與儲存訊息明講被夾了，但別讓自己踩到。
+  min_cmd_alt_m: 20.0
+  max_cmd_alt_m: 120.0
+  # 載體專屬覆蓋：兩種載體不可能共用同一個高度下限——固定翼低於安全高度
+  # 就是墜機，旋翼在 4m 懸停卻是再正常不過的測試。共用一個值的下場是
+  # 「為了旋翼調鬆，忘了調回來就飛固定翼」。
+  multirotor:
+    min_cmd_alt_m: 3.0       # 旋翼可低空跟隨；別設 0，留一點地面餘裕
+  fixedwing:
+    min_cmd_alt_m: 20.0      # 固定翼要有迴旋與失速餘裕
   max_meas_jump_m: 30.0      # 單幀測地跳變硬上限（KF gate 之外的最後防線）
   # 以下對應機上 global_goto_node 的同名 gate；direct 模式（不經 companion）時
   # 由地面端把關，資料來自 MAVLink GPS_RAW_INT / EXTENDED_SYS_STATE。

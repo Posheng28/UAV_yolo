@@ -87,14 +87,17 @@ function renderStatus(st) {
 
   // 閘門
   const gates = $("#gate-list");
+  // 高度被夾制永遠優先顯示：設定頁寫 4m、實際飛 20m，這種落差不能只在存檔時講一次
+  const altWarn = st.alt_clamp_note
+    ? `<div class="gate-item warn">⚠ ${st.alt_clamp_note}</div>` : "";
   if (st.guidance_enabled && st.gates.length === 0) {
     // 節流/deadband 是正常流量控制，用中性樣式；紅色 ✗ 只保留給真正的安全阻擋
-    gates.innerHTML = `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>` +
+    gates.innerHTML = altWarn + `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>` +
       (st.guidance_note ? `<div class="gate-item info">⏱ ${st.guidance_note}</div>` : "");
   } else if (st.gates.length) {
-    gates.innerHTML = st.gates.map((g) => `<div class="gate-item">✗ ${g}</div>`).join("");
+    gates.innerHTML = altWarn + st.gates.map((g) => `<div class="gate-item">✗ ${g}</div>`).join("");
   } else {
-    gates.innerHTML = "";
+    gates.innerHTML = altWarn;
   }
 
   // 最後指令
@@ -413,7 +416,10 @@ const FIELDS = [
   { path: "guidance.fixedwing.lead_time_s", label: "預測前置秒數", type: "number" },
   { sec: "安全" },
   { path: "safety.max_cmd_distance_m", label: "距 Home 圍欄 m", type: "number" },
-  { path: "safety.min_cmd_alt_m", label: "指令高度下限 m", type: "number" },
+  { path: "safety.multirotor.min_cmd_alt_m", label: "指令高度下限 m（旋翼）", type: "number",
+    hint: "導引高度低於此值會被夾到此值；旋翼可低空跟隨" },
+  { path: "safety.fixedwing.min_cmd_alt_m", label: "指令高度下限 m（固定翼）", type: "number",
+    hint: "固定翼要有迴旋與失速餘裕，別跟旋翼共用" },
   { path: "safety.max_cmd_alt_m", label: "指令高度上限 m", type: "number" },
   { sec: "接飛控的 MAVLink 數傳（電台）" },
   { path: "mavlink.port", label: "數傳 COM 埠", type: "text",

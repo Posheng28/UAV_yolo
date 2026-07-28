@@ -73,6 +73,7 @@ class EngineStatus:
     loop_hz: float = 0.0
     detector_error: str | None = None  # 推論丟例外＝畫面看似沒車，必須讓操作員看到
     loop_error: str | None = None      # 迴圈本體例外（比偵測失敗更嚴重）
+    alt_clamp_note: str | None = None  # 設定的導引高度被安全上下限夾掉時的說明
 
 
 class TrackerEngine:
@@ -113,7 +114,7 @@ class TrackerEngine:
         self.coast_timeout_s = float(est_cfg.get("coast_timeout_s", 8.0))
 
         self.guidance = build_guidance(self.airframe, cfg.section("guidance"))
-        self.gates = SafetyGates(cfg.section("safety"), cfg.get("guidance.rate_hz", 1.0))
+        self.gates = SafetyGates(self._safety_cfg(), cfg.get("guidance.rate_hz", 1.0))
         self.guidance_enabled = bool(cfg.get("guidance.enabled", False))
         deadband_key = "fixedwing" if self.airframe == "fixedwing" else "multirotor"
         self.reposition_deadband_m = float(
@@ -211,7 +212,7 @@ class TrackerEngine:
         applied: list[str] = []
 
         # 安全門檻：就地更新，保留接管閂鎖
-        self.gates.update_limits(cfg.section("safety"), cfg.get("guidance.rate_hz", 1.0))
+        self.gates.update_limits(self._safety_cfg(), cfg.get("guidance.rate_hz", 1.0))
         applied.append("safety")
 
         # 導引參數（載體種類仍需重啟，這裡只換同載體的數值）
@@ -221,6 +222,10 @@ class TrackerEngine:
             cfg.get(f"guidance.{deadband_key}.reposition_deadband_m", 3.0)
         )
         applied.append("guidance")
+        # 存檔當下就要講：填 4m 卻被夾成 20m，等飛上去才發現就太遲了
+        alt_warn = self.alt_clamp_warning()
+        if alt_warn:
+            applied.append(f"⚠ {alt_warn}")
 
         # 偵測器閾值與鎖定行為
         det_cfg = cfg.section("detector")
@@ -435,6 +440,40 @@ class TrackerEngine:
             self.estimator.reset()
 
     # ------------------------------------------------ 導引 + 雲台
+
+    def _safety_cfg(self) -> dict:
+        """安全門檻：`safety.<載體>` 子區段覆蓋 `safety` 的共用值。
+
+        高度限制不可能兩種載體共用一個數字：固定翼低於安全高度就是墜機，
+        旋翼在 4m 懸停卻是再正常不過的測試。共用一個值的結果是操作員把它
+        調鬆到適合旋翼，然後忘了換回來就飛固定翼。
+        """
+        merged = {k: v for k, v in self.cfg.section("safety").items()
+                  if k not in ("multirotor", "fixedwing")}
+        merged.update(self.cfg.section("safety").get(self.airframe) or {})
+        return merged
+
+    def alt_clamp_warning(self) -> str | None:
+        """導引高度會被安全上下限夾掉時的警告字串（沒被夾則回 None）。
+
+        操作員在設定頁填「跟隨高度 4m」，安全下限卻是 20m —— 送出去的是 20m，
+        飛機會爬到操作員沒預期的高度。夾制本身是對的（防止自動飛太低），
+        但**默默夾掉不講**就是災難：畫面上寫 4，飛機飛 20。
+        """
+        requested = getattr(self.guidance, "follow_alt_m", None)
+        if requested is None:
+            requested = getattr(self.guidance, "alt_m", None)
+        if requested is None:
+            return None
+        requested = float(requested)
+        clamped = self.gates.clamp_alt(requested)
+        if abs(clamped - requested) < 1e-6:
+            return None
+        return (
+            f"導引高度 {requested:.0f}m 會被安全限制夾到 {clamped:.0f}m"
+            f"（下限 {self.gates.min_cmd_alt_m:.0f}m／上限 {self.gates.max_cmd_alt_m:.0f}m）"
+            "——要真的飛這個高度，請一併調整安全高度下限"
+        )
 
     def _run_guidance(self, now: float) -> None:
         store = self.link.store
@@ -677,6 +716,7 @@ class TrackerEngine:
             loop_hz=round(loop_hz, 1),
             detector_error=self.detector_error,
             loop_error=self.loop_error,
+            alt_clamp_note=self.alt_clamp_warning(),
         )
         status.vehicle["path"] = list(self.vehicle_path)[-200:]
         status.target["path"] = list(self.target_path)[-200:]
@@ -685,7 +725,11 @@ class TrackerEngine:
 
     def status(self) -> EngineStatus:
         with self._status_lock:
-            return self._status
+            status = self._status
+        # 高度夾制警告來自設定、不是量測，所以不該等到跑完一幀才出現：
+        # 影像還沒進來（或斷線）時操作員最需要看到「你填的高度不會生效」。
+        status.alt_clamp_note = self.alt_clamp_warning()
+        return status
 
 
 def create_engine(cfg: Config) -> TrackerEngine:

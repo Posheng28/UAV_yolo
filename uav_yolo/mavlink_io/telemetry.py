@@ -545,6 +545,7 @@ class MavlinkConnection:
         self, lat: float, lon: float, alt_amsl: float,
         alt_rel_m: float | None = None,
         loiter_radius_m: float | None = None, loiter_ccw: bool = False,
+        speed_ms: float | None = None,
     ) -> None:
         """DO_REPOSITION：旋翼=飛到點懸停；固定翼=以 NAV_LOITER_RAD（或 param3）繞行。
 
@@ -571,7 +572,9 @@ class MavlinkConnection:
         yaw_param = (1.0 if loiter_ccw else 0.0) if loiter_radius_m else float("nan")
         self._command_int(
             MAV_FRAME_GLOBAL_INT, MAV_CMD_DO_REPOSITION,
-            -1.0,                                  # p1 地速：預設
+            # p1 地速上限。-1 = 用飛控的 MPC_XY_CRUISE：低空做小距離修正會衝到
+            # 約 3m/s、傾角約 17 度，把相機視軸甩開——而相機幾何就是座標的來源。
+            float(speed_ms) if speed_ms and speed_ms > 0 else -1.0,
             MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,   # p2 切到 Hold 執行
             radius,                                # p3 定翼繞行半徑（部分版本支援，否則用 NAV_LOITER_RAD）
             yaw_param,                             # p4 定翼繞向 0=CW 1=CCW

@@ -581,11 +581,12 @@ class TrackerEngine:
 
         lat, lon, _ = self.georef.ned_to_lla(np.array([cmd.point_ne[0], cmd.point_ne[1], 0.0]))
         alt_amsl = (self.home_alt_amsl or 0.0) + cmd.alt_rel_m
-        self.link.send_reposition(
+        self.link.send_reposition(  # speed_ms 為 None 時各後端自行退回飛控預設
             lat, lon, alt_amsl,
             alt_rel_m=cmd.alt_rel_m,   # LR24 GOTO 用相對 home 高度；MAVLink 直連忽略
             loiter_radius_m=cmd.loiter_radius_m,
             loiter_ccw=cmd.loiter_ccw,
+            speed_ms=cmd.speed_ms,
         )
         self.gates.mark_sent(now)
         self.last_cmd = LastCommand(

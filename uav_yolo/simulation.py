@@ -86,6 +86,7 @@ class SimWorld:
         self.cmd_alt_rel: float | None = None
         self.cmd_radius: float | None = None
         self.cmd_ccw = False
+        self.cmd_speed: float | None = None   # 最後一筆指令的地速上限
         self.roi_point: np.ndarray | None = None
 
         # 雲台（自穩、地理系角度）；無 ROI 時預設垂直朝下
@@ -238,12 +239,14 @@ class SimLink:
 
     # ---- 指令介面（與 MavlinkConnection 同簽名） ----
 
-    def send_reposition(self, lat, lon, alt_amsl, alt_rel_m=None, loiter_radius_m=None, loiter_ccw=False) -> None:
+    def send_reposition(self, lat, lon, alt_amsl, alt_rel_m=None, loiter_radius_m=None,
+                        loiter_ccw=False, speed_ms=None) -> None:
         ned = self.world.georef.lla_to_ned(lat, lon, 0.0)
         self.world.cmd_point = np.array([ned[0], ned[1]])
         self.world.cmd_alt_rel = alt_rel_m if alt_rel_m is not None else alt_amsl - self.world.home_alt_amsl
         self.world.cmd_radius = loiter_radius_m
         self.world.cmd_ccw = loiter_ccw
+        self.world.cmd_speed = speed_ms
         self.world.repositions.append(
             {"t": self.world.sim_t, "n": float(ned[0]), "e": float(ned[1]),
              "alt_rel": self.world.cmd_alt_rel, "radius": loiter_radius_m}

@@ -330,8 +330,11 @@ class CompositeLink:
 
     # ---- 指令 ----
 
-    def send_reposition(self, lat, lon, alt_amsl, alt_rel_m=None, loiter_radius_m=None, loiter_ccw=False):
-        # LR24 GOTO 幀不帶 loiter 半徑/方向——固定翼繞行半徑由 PX4 NAV_LOITER_RAD 決定。
+    def send_reposition(self, lat, lon, alt_amsl, alt_rel_m=None, loiter_radius_m=None,
+                        loiter_ccw=False, speed_ms=None):
+        # LR24 GOTO 幀只有 lat/lon/alt，帶不了 loiter 半徑/方向與速度上限：
+        # 半徑由 PX4 NAV_LOITER_RAD 決定，速度由機上 global_goto_node 或
+        # MPC_XY_CRUISE 決定。走這條後端時 speed_ms 不會生效。
         if self.goto_alt_ref == "rel_home" and alt_rel_m is not None:
             self.command.goto(lat, lon, alt_rel_m, ref="rel_home")
         else:

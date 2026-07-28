@@ -234,6 +234,8 @@ def main() -> int:
             "BAT_LOW_THR", "BAT_CRIT_THR", "BAT_EMERGEN_THR",
             "CBRK_SUPPLY_CHK", "COM_ARM_WO_GPS", "COM_ARM_CHK_ESCS",
             "COM_ARM_MAG_ANG", "COM_PREARM_MODE", "COM_DISARM_PRFLT",
+            # 電量不足時飛控會做什麼——比「不能 arm」危險，因為它在空中發動
+            "COM_LOW_BAT_ACT", "BAT1_R_INTERNAL", "BAT1_I_CHANNEL", "BAT1_V_CHANNEL",
         ]
         print("\n讀取參數中…")
         got: dict[str, float] = {}
@@ -273,6 +275,23 @@ def main() -> int:
             print(f"  對帳：拿平衡頭電表量總電壓。若電表比 {volt:.2f} V 明顯高，"
                   f"就是 BAT1_V_DIV（目前 {vdiv:g}）校歪，")
             print(f"        飛控會把健康電池當低電量。QGC → Power → 電池校正可修。")
+
+            # 校正歪掉時，換算出「電表讀數 → 應該設多少 V_DIV」
+            if vdiv:
+                print(f"\n  若你的電表讀數是 X 伏，正確的 BAT1_V_DIV = {vdiv:g} × X ÷ {volt:.2f}：")
+                for actual in (14.8, 15.2, 15.6, 16.0, 16.8):
+                    print(f"      電表 {actual:.1f} V → V_DIV 應設 {vdiv * actual / volt:.2f}"
+                          f"   （每 cell {actual/ncell:.2f} V）")
+
+            # 低電量在空中會做什麼——這比「不能 arm」危險
+            act = got.get("COM_LOW_BAT_ACT")
+            acts = {0: "僅警告", 1: "返航(RTL)", 2: "就地降落", 3: "警告→返航→降落"}
+            if act is not None:
+                lvl = BAD if act else OK
+                print(f"\n  低電量動作 COM_LOW_BAT_ACT = {act:g}（{acts.get(int(act), '?')}）")
+                if act:
+                    print(f"  {lvl} 電壓校正若偏低，飛控會在電池其實還夠的時候"
+                          f"{acts.get(int(act))}——這是飛行中發動的，比擋 arm 嚴重。")
 
     gps = latest.get("GPS_RAW_INT")
     if gps:

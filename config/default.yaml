@@ -54,19 +54,25 @@ gimbal:
 detector:
   # 偵測模型。⚠ 各模型只認自己訓練過的目標——實測：只用玩具車微調的模型
   # 對真實空拍車輛的偵測數從 44 掉到 0（完全遺忘）。換場景務必在設定頁換模型。
-  #   weights/toycar.pt  室內玩具車（自訓）
-  #   weights/best.pt    空拍真車（自訓）
-  #   weights/yolo26n.pt COCO 通用 80 類（含真實汽車/卡車/行人）
-  #   weights/yolo11s.pt COCO 通用 small，較準較慢
+  #   weights/toycar.pt      室內玩具車（自訓；200 張、imgsz 960）
+  #   weights/toycar_v1_640.pt 同上的前一版（67 張、imgsz 640），留著對照用
+  #   weights/best.pt        空拍真車（自訓）
+  #   weights/yolo26n.pt     COCO 通用 80 類（含真實汽車/卡車/行人）
+  #   weights/yolo11s.pt     COCO 通用 small，較準較慢
   #
   # 選 .onnx 檔＝走 ONNX Runtime + DirectML，用 AMD/Intel GPU 推論。
-  # 本機實測（Radeon RX 7700S，同 120 幀、結果逐框相同）：
-  #   PyTorch CPU 129ms/幀（8 FPS） → ONNX DirectML 9.4ms/幀（97 FPS），13.8x
+  # 本機實測（Radeon RX 7700S、toycar 模型 @960、100 幀、無其他負載）：
+  #   PyTorch CPU 71.2ms/幀（14 FPS） → ONNX DirectML 12.4ms/幀（80 FPS），5.7x
+  # 且兩條路徑逐框一致（120 幀框數全同、座標偏差 <0.1px）。
   # 迴圈速率直接決定追蹤品質：太慢時目標在兩個處理幀之間跑太遠會關聯不上。
-  # 匯出（換了 .pt 就要重匯出）：
+  # 匯出（換了 .pt 就要重匯出；imgsz 要對齊該模型的訓練尺寸）：
   #   set ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS=1
-  #   python -c "from ultralytics import YOLO; YOLO('weights/toycar.pt').export(
-  #       format='onnx', imgsz=[384,640], dynamic=False, simplify=True, opset=20)"
+  #   python -c "from ultralytics import YOLO; from uav_yolo.vision.onnx_backend import
+  #       export_input_size as s; YOLO('weights/toycar.pt').export(format='onnx',
+  #       imgsz=list(s((1080,1920), 960)), dynamic=False, simplify=True, opset=20)"
+  #   ⚠ 尺寸一定要用 export_input_size 算（短邊補到 stride 32 的倍數，
+  #     1920x1080@960 = 544x960，不是 576x960）。手算錯了框會偏約 10px，
+  #     畫面看起來完全正常，只有跟 .pt 對拍才驗得出來。
   # imgsz 在匯出時就固定（DirectML 對 dynamic shape 會變慢），之後改設定無效，
   # 系統會在設定頁明講「未套用」而不是默默忽略。
   weights: weights/best.pt   # 不存在時自動退 yolo26n.pt（COCO 預訓練）

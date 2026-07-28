@@ -180,7 +180,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     # 已知權重的用途說明（下拉選單顯示用）。實測結論見 integration/TRAIN_YOUR_TARGET.md：
     # 只用玩具車微調的模型會 100% 遺忘真車（44→0），所以必須保留多個模型切換。
     WEIGHT_NOTES = {
-        "toycar.pt": "室內玩具車（自訓）— 真車無效",
+        "toycar.pt": "室內玩具車（自訓 200 張＠960）— 真車無效",
+        "toycar_v1_640.pt": "玩具車舊版（67 張＠640）— 已被 toycar.pt 取代，留作對照",
         "best.pt": "空拍真車（自訓）— 玩具車無效",
         "yolo26n.pt": "COCO 通用 nano — 真實車輛/行人等 80 類",
         "yolo11s.pt": "COCO 通用 small — 較準但較慢",

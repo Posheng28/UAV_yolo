@@ -10,10 +10,41 @@ import numpy as np
 import pytest
 
 from uav_yolo.vision.detector import Detector
-from uav_yolo.vision.onnx_backend import letterbox
+from uav_yolo.vision.onnx_backend import export_input_size, letterbox
 
 ROOT = Path(__file__).resolve().parent.parent
 ONNX = ROOT / "weights" / "toycar.onnx"
+
+
+# ---------------- 匯出尺寸（踩過的雷） ----------------
+
+def test_export_input_size_rounds_short_side_up_to_stride():
+    """短邊要補到 stride 32 的倍數，不是任意比例。
+
+    實際踩過：1920x1080 @960 我算成 576（=960×0.6），正確是 544
+    （540 補到 32 的倍數）。匯出尺寸不對，網路看到的尺度就與 .pt 路徑不同，
+    框位置偏掉約 10px——而且畫面看起來完全正常，只有對拍才驗得出來。
+    """
+    assert export_input_size((1080, 1920), 640) == (384, 640)
+    assert export_input_size((1080, 1920), 960) == (544, 960)
+    assert export_input_size((1080, 1920), 1280) == (736, 1280)
+
+
+def test_export_input_size_handles_portrait_and_square():
+    assert export_input_size((1920, 1080), 640) == (640, 384)   # 直立
+    assert export_input_size((720, 720), 640) == (640, 640)     # 正方
+
+
+@pytest.mark.skipif(not ONNX.exists(), reason="尚未匯出 weights/toycar.onnx")
+def test_exported_model_matches_the_computed_size():
+    """實際匯出的模型必須符合上面的規則，否則就是又手算錯了。"""
+    import onnxruntime as ort
+
+    shape = ort.InferenceSession(str(ONNX), providers=["CPUExecutionProvider"]).get_inputs()[0].shape
+    h, w = int(shape[2]), int(shape[3])
+    assert (h, w) == export_input_size((1080, 1920), w), (
+        f"匯出尺寸 {w}x{h} 與 1920x1080 來源的 rect letterbox 不符"
+    )
 
 
 # ---------------- letterbox 幾何（不需要模型） ----------------
@@ -77,8 +108,9 @@ def test_set_imgsz_refuses_to_pretend_on_static_onnx():
     """
     d = Detector(str(ONNX), conf=0.5, imgsz=640, class_names=["Car"])
     d._ensure_model()
-    assert d.set_imgsz(640) is None          # 與匯出尺寸相符 → 沒問題
-    reason = d.set_imgsz(1280)
+    exported = max(d._model.input_hw)        # 尺寸要跟模型問，不能寫死在測試裡
+    assert d.set_imgsz(exported) is None     # 與匯出尺寸相符 → 沒問題
+    reason = d.set_imgsz(exported * 2)
     assert reason and "重新匯出" in reason
 
 
@@ -116,8 +148,10 @@ def test_onnx_and_pytorch_agree_on_the_same_frames():
     if not imgs or not pt.exists():
         pytest.skip("缺少比對用的影像或 .pt 權重")
 
-    a = Detector(str(pt), conf=0.45, imgsz=640, class_names=["Car"])
     b = Detector(str(ONNX), conf=0.45, imgsz=640, class_names=["Car"])
+    b._ensure_model()
+    # .pt 要用與 ONNX 匯出相同的推論尺寸，否則比的是兩種尺寸不是兩種後端
+    a = Detector(str(pt), conf=0.45, imgsz=max(b._model.input_hw), class_names=["Car"])
     for i, p in enumerate(imgs):
         frame = cv2.imread(str(p))
         da = sorted(a.detect(frame, i / 30.0), key=lambda d: d.bbox)

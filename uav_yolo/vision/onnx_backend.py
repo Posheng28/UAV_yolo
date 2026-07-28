@@ -25,6 +25,25 @@ import cv2
 import numpy as np
 
 
+def export_input_size(src_hw: tuple[int, int], imgsz: int, stride: int = 32) -> tuple[int, int]:
+    """算出 ONNX 應該匯出的輸入尺寸 (高, 寬)，對齊 ultralytics 的 rect letterbox。
+
+    ultralytics predict 走 rect 模式：長邊縮到 imgsz，短邊按比例縮後**補到 stride
+    的倍數**（不是補成正方形，也不是任意比例）。匯出尺寸沒對齊就等於網路看到的
+    尺度和 .pt 路徑不同——實測 1920x1080 @960 匯出成 576（而非正確的 544）時，
+    框位置就偏掉約 10px。
+
+        >>> export_input_size((1080, 1920), 640)
+        (384, 640)
+        >>> export_input_size((1080, 1920), 960)
+        (544, 960)
+    """
+    h0, w0 = src_hw
+    r = imgsz / max(h0, w0)
+    long_side, short_side = imgsz, int(np.ceil(min(h0, w0) * r / stride)) * stride
+    return (short_side, long_side) if w0 >= h0 else (long_side, short_side)
+
+
 def letterbox(frame, out_hw: tuple[int, int]) -> tuple[np.ndarray, float, float, float]:
     """等比縮放置中補邊到固定尺寸，回傳 (影像, 縮放比, 左padding, 上padding)。"""
     out_h, out_w = out_hw

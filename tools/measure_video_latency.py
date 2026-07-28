@@ -1,95 +1,53 @@
-"""量測影像鏈路端到端延遲（相機→圖傳→採集卡→OpenCV）。
+"""量測影像鏈路端到端延遲（螢幕→相機→圖傳→採集卡→OpenCV）。
 
-原理（不需要人的反應時間）：
-    螢幕上顯示一個大字計時器 → 相機對著螢幕拍 → 畫面繞一圈回到電腦。
-    此時「擷取到的那一幀裡顯示的數字」是它被拍下的那一刻，
-    而「現在」是它抵達的時刻，兩者相減 = 整條鏈路延遲。
-    兩個時間都由同一台電腦的同一個時鐘產生，所以沒有人為誤差。
+原理：不靠人的反應時間
+-----------------------------------
+電腦全螢幕在黑白之間翻轉，並記下「翻轉的那一刻」；相機拍著這個螢幕，
+畫面繞一圈回到電腦後，程式偵測擷取畫面裡的亮度何時跟著翻轉，
+記下「察覺的那一刻」。兩個時刻都由同一台電腦的同一個時鐘產生，
+相減就是整條鏈路的延遲，完全沒有人為誤差。
 
-用法：
-    1. 把相機（雲台上那顆、走實際圖傳）對著這個視窗的計時器
-    2. python tools/measure_video_latency.py --name "USB Video"
-    3. 視窗左邊是計時器、右邊是收到的畫面；讀出兩個數字相減
-       （程式也會自動偵測並統計，見下）
+為什麼用「整片閃爍」而不是條碼
+-----------------------------------
+早期版本在畫面頂端畫二進位條碼，然後在擷取畫面的頂端解碼。
+那假設「螢幕填滿整個擷取畫面」，但實際上相機看到的是螢幕在視野中的
+一個矩形，而且 Walksnail VRX 還會在上緣疊 OSD（NO SD／電壓／訊號）。
+條碼幾乎永遠不會落在它預期的位置，結果就是一直 pattern not found。
+整片亮度翻轉不管螢幕在畫面哪裡、多大、有沒有被 OSD 遮到都成立。
 
-自動偵測：
-    計時器同時以「二進位光柵」編碼時間（畫面頂端一排黑白格），
-    程式在收到的畫面裡找這排格子並解碼，就能自動算出延遲、
-    連續取樣後給出中位數與標準差——這是最可靠的讀值。
+用法
+-----------------------------------
+    python tools/measure_video_latency.py --name "USB Video"
 
-按 q 結束並列印統計。
+    1. 會跳出一個黑白閃爍的視窗，把相機對著它（占畫面越大越好）
+    2. 程式自動校準亮暗，然後開始取樣，畫面上會顯示每次的延遲
+    3. 收滿樣本會印出中位數 → 填進設定頁的「圖傳延遲 ms」
+    按 q 可提前結束。
+
+讀值的兩個但書
+-----------------------------------
+  * 量到的值含「螢幕本身的顯示延遲」（一般 5~15ms），會讓結果略為高估。
+  * 解析度受限於採集幀率：30fps 的量化下限約 33ms，所以個位數差異沒有意義。
 """
 
 from __future__ import annotations
 
 import argparse
+import random
+import sys
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-# 光柵參數：14 bit 可表示 0~16383 ms（約 16 秒循環），足夠涵蓋任何圖傳延遲
-BITS = 14
-STRIP_FRAC = 0.14   # 光柵帶佔畫面高度比例——用比例而非固定像素，縮放後才解得出
-MARGIN_FRAC = 0.03  # 左右留白比例
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-
-def make_pattern_frame(ms: int, w: int = 1280, h: int = 720) -> np.ndarray:
-    """產生「計時器＋二進位光柵」畫面。"""
-    img = np.full((h, w, 3), 255, np.uint8)
-
-    strip_h = max(int(h * STRIP_FRAC), 8)
-    margin = int(w * MARGIN_FRAC)
-    cell = (w - 2 * margin) / (BITS + 2)  # 含頭尾兩個定位格
-
-    # 頂端光柵：頭尾各一個黑色定位標記，中間 BITS 個資料格
-    x = float(margin)
-    cv2.rectangle(img, (int(x), 0), (int(x + cell), strip_h), (0, 0, 0), -1)
-    x += cell
-    for i in range(BITS):
-        bit = (ms >> (BITS - 1 - i)) & 1
-        color = (0, 0, 0) if bit else (255, 255, 255)
-        cv2.rectangle(img, (int(x), 0), (int(x + cell), strip_h), color, -1)
-        x += cell
-    cv2.rectangle(img, (int(x), 0), (int(x + cell), strip_h), (0, 0, 0), -1)
-
-    # 人眼可讀的大字計時器（備援：自動解碼失敗時可用肉眼對照截圖）
-    text = f"{ms/1000.0:7.3f} s"
-    cv2.putText(img, text, (60, h // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX,
-                4.5, (0, 0, 0), 10, cv2.LINE_AA)
-    cv2.putText(img, "point the camera at this window",
-                (60, h - 60), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (90, 90, 90), 2, cv2.LINE_AA)
-    return img
-
-
-def decode_pattern(frame: np.ndarray) -> int | None:
-    """從擷取畫面解出光柵編碼的毫秒值。找不到回 None。"""
-    h, w = frame.shape[:2]
-    # 取畫面頂端一條略高於光柵帶的區域（比例定義，縮放後仍成立）
-    strip = frame[: max(int(h * STRIP_FRAC * 0.8), 6), :]
-    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # 取中間一列掃描，找黑白交界
-    row = bw[bw.shape[0] // 2, :]
-    dark = row < 128
-    # 找第一個與最後一個黑區（定位標記）
-    idx = np.flatnonzero(dark)
-    if idx.size < 10:
-        return None
-    left, right = int(idx[0]), int(idx[-1])
-    span = right - left
-    if span < 100:
-        return None
-    # 標記之間共 BITS+2 格（含兩個定位格）
-    cell = span / (BITS + 2)
-    value = 0
-    for i in range(BITS):
-        cx = int(left + cell * (1.5 + i))  # 第 i 個資料格中心
-        if not (0 <= cx < row.size):
-            return None
-        value = (value << 1) | (1 if dark[cx] else 0)
-    return value
+WIN_FLASH = "latency flash  (point the camera here)"
+WIN_VIEW = "captured"
+ROI_FRAC = 0.30          # 取擷取畫面中央這個比例的區域測亮度
+MIN_CONTRAST = 18.0      # 亮暗差低於此值就是沒對準／太暗，不要硬測
+SETTLE_S = 0.25          # 翻轉後最少等這麼久才接受偵測，濾掉殘影抖動
 
 
 def open_source(name_hint: str, index: int, width: int, height: int):
@@ -99,8 +57,70 @@ def open_source(name_hint: str, index: int, width: int, height: int):
         "source": "uvc", "uvc_name_hint": name_hint, "uvc_index": index,
         "width": width, "height": height, "fourcc": "MJPG",
     })
-    cap = src._open()
-    return cap, src.device_label
+    return src._open(), src.device_label
+
+
+def roi_mean(frame: np.ndarray) -> float:
+    h, w = frame.shape[:2]
+    dy, dx = int(h * (1 - ROI_FRAC) / 2), int(w * (1 - ROI_FRAC) / 2)
+    roi = frame[dy:h - dy, dx:w - dx]
+    return float(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).mean())
+
+
+def draw_roi(frame: np.ndarray) -> np.ndarray:
+    h, w = frame.shape[:2]
+    dy, dx = int(h * (1 - ROI_FRAC) / 2), int(w * (1 - ROI_FRAC) / 2)
+    out = cv2.resize(frame, (800, int(800 * h / w)))
+    sy, sx = 800 / w, 800 / w
+    cv2.rectangle(out, (int(dx * sx), int(dy * sy)),
+                  (int((w - dx) * sx), int((h - dy) * sy)), (0, 200, 255), 2)
+    return out
+
+
+def show_flash(white: bool, headless: bool = False) -> None:
+    if headless:
+        _FakeCap.flash_state = white
+        return
+    img = np.full((720, 1280, 3), 255 if white else 0, np.uint8)
+    cv2.imshow(WIN_FLASH, img)
+
+
+class _FakeCap:
+    """自我檢驗用：延遲固定的假相機。
+
+    有了它才敢叫人相信量出來的數字——先證明這套邏輯能把「已知的延遲」
+    量回來，再拿去量未知的真實鏈路。
+    """
+
+    flash_state = False
+
+    def __init__(self, delay_ms: float, fps: float = 30.0):
+        self.delay_s = delay_ms / 1000.0
+        self.period = 1.0 / fps
+        self._history: list[tuple[float, bool]] = []
+        self._next = time.monotonic()
+
+    def read(self):
+        now = time.monotonic()
+        self._history.append((now, _FakeCap.flash_state))
+        if now < self._next:               # 模擬幀率上限
+            time.sleep(max(0.0, self._next - now))
+            now = time.monotonic()
+        self._next = now + self.period
+        # 這一幀「拍到」的是 delay 秒前的螢幕狀態
+        shot_t = now - self.delay_s
+        state = False
+        for t, s in self._history:
+            if t <= shot_t:
+                state = s
+            else:
+                break
+        self._history = [h for h in self._history if h[0] > shot_t - 1.0]
+        level = 200 if state else 40
+        return True, np.full((240, 320, 3), level, np.uint8)
+
+    def release(self):
+        pass
 
 
 def main() -> int:
@@ -109,71 +129,156 @@ def main() -> int:
     ap.add_argument("--index", type=int, default=1)
     ap.add_argument("--width", type=int, default=1920)
     ap.add_argument("--height", type=int, default=1080)
+    ap.add_argument("--samples", type=int, default=20, help="要收幾次翻轉")
+    ap.add_argument("--selftest", type=float, default=None, metavar="MS",
+                    help="不接相機，用已知延遲的假相機驗證量測邏輯本身")
     args = ap.parse_args()
 
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-    cap, label = open_source(args.name, args.index, args.width, args.height)
-    if cap is None:
-        print("!! 無法開啟影像來源；先用設定頁『測試影像來源』確認名稱/索引")
-        return 1
+    headless = args.selftest is not None
+    if headless:
+        print(f">>> 自我檢驗：注入已知延遲 {args.selftest:.0f} ms，看能不能量回來")
+        cap, label = _FakeCap(args.selftest), f"fake({args.selftest:.0f}ms)"
+    else:
+        cap, label = open_source(args.name, args.index, args.width, args.height)
+        if cap is None:
+            print("!! 無法開啟影像來源；先用設定頁『測試影像來源』確認名稱/索引")
+            return 1
     print(f">>> 影像來源：{label}")
-    print(">>> 把相機對準『latency timer』視窗，等數值穩定後按 q 結束\n")
 
-    cv2.namedWindow("latency timer", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("latency timer", 1280, 720)
-    cv2.namedWindow("captured", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("captured", 800, 450)
+    if not headless:
+        cv2.namedWindow(WIN_FLASH, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WIN_FLASH, 900, 520)
+        cv2.namedWindow(WIN_VIEW, cv2.WINDOW_NORMAL)
 
-    t0 = time.monotonic()
+    def wait_q() -> bool:
+        return False if headless else (cv2.waitKey(1) & 0xFF == ord("q"))
+
+    def view(frame) -> None:
+        if not headless:
+            cv2.imshow(WIN_VIEW, draw_roi(frame))
+
+    frame_gaps: list[float] = []
+    _last_grab = [0.0]
+
+    def grab():
+        ok, f = cap.read()
+        if not (ok and f is not None):
+            return None, 0.0
+        t = time.monotonic()
+        if _last_grab[0]:
+            frame_gaps.append(t - _last_grab[0])
+        _last_grab[0] = t
+        return f, t
+
+    # ---------- 校準：量白畫面與黑畫面在擷取端各是多亮 ----------
+    print(">>> 校準中：把相機對準閃爍視窗，讓它盡量填滿畫面…")
+    levels = {}
+    for white in (True, False):
+        show_flash(white, headless)
+        wait_q()
+        t_end = time.monotonic() + 1.5
+        vals = []
+        while time.monotonic() < t_end:
+            f, _ = grab()
+            if f is not None:
+                vals.append(roi_mean(f))
+                view(f)
+            if wait_q():
+                cap.release(); cv2.destroyAllWindows(); return 1
+        levels[white] = float(np.median(vals[len(vals) // 2:])) if vals else 0.0
+
+    hi, lo = levels[True], levels[False]
+    contrast = hi - lo
+    print(f"    白畫面亮度 {hi:.1f}｜黑畫面亮度 {lo:.1f}｜對比 {contrast:.1f}")
+    if contrast < MIN_CONTRAST:
+        print(f"!! 對比只有 {contrast:.1f}（需 >{MIN_CONTRAST:.0f}）。")
+        print("   把相機拉近讓視窗填滿畫面、關掉房間強光、確認相機真的拍著這個視窗。")
+        cap.release(); cv2.destroyAllWindows()
+        return 1
+    mid = (hi + lo) / 2.0
+
+    # ---------- 量測：隨機時間翻轉，看擷取端何時跨過中線 ----------
+    print(f">>> 開始量測（目標 {args.samples} 次翻轉），按 q 可提前結束\n")
     samples: list[float] = []
-    last_report = 0.0
+    white = False
+    show_flash(white, headless)
+    wait_q()
 
-    while True:
-        now_ms = int((time.monotonic() - t0) * 1000) % (1 << BITS)
-        cv2.imshow("latency timer", make_pattern_frame(now_ms))
+    while len(samples) < args.samples:
+        # 翻轉前隨機停留，避免與擷取幀率同步而產生系統性偏差
+        t_hold_end = time.monotonic() + random.uniform(0.4, 0.9)
+        while time.monotonic() < t_hold_end:
+            f, _ = grab()
+            if f is not None:
+                view(f)
+            if wait_q():
+                break
 
-        ok, frame = cap.read()
-        if ok and frame is not None:
-            arrival_ms = int((time.monotonic() - t0) * 1000) % (1 << BITS)
-            shot_ms = decode_pattern(frame)
-            disp = cv2.resize(frame, (800, 450))
-            if shot_ms is not None:
-                delay = (arrival_ms - shot_ms) % (1 << BITS)
-                if 0 < delay < 3000:  # 合理範圍才收
-                    samples.append(delay)
-                    cv2.putText(disp, f"{delay} ms", (20, 60),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 220, 0), 3)
-            else:
-                cv2.putText(disp, "pattern not found", (20, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            cv2.imshow("captured", disp)
+        white = not white
+        show_flash(white, headless)
+        wait_q()                    # waitKey 才會真的把畫面畫上去
+        t_flip = time.monotonic()   # 故意在畫上去之後才記時
 
-            if samples and time.monotonic() - last_report > 1.0:
-                last_report = time.monotonic()
-                arr = np.array(samples[-120:])
-                print(f"  n={len(samples):4d}  中位數 {np.median(arr):6.0f} ms  "
-                      f"標準差 {arr.std():5.0f} ms", end="\r")
+        deadline = t_flip + 3.0
+        found = False
+        while time.monotonic() < deadline:
+            f, t_arrive = grab()
+            if f is None:
+                if wait_q():
+                    break
+                continue
+            m = roi_mean(f)
+            if (m > mid) if white else (m < mid):
+                delay = (t_arrive - t_flip) * 1000.0
+                samples.append(delay)
+                arr = np.array(samples)
+                print(f"  第 {len(samples):2d} 次：{delay:6.0f} ms"
+                      f"   （目前中位數 {np.median(arr):.0f} ms）")
+                found = True
+                break
+            view(f)
+            if wait_q():
+                break
+        if not found:
+            print("  （這次沒偵測到翻轉，跳過——相機可能沒對準）")
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        if not headless and cv2.getWindowProperty(WIN_FLASH, cv2.WND_PROP_VISIBLE) < 1:
             break
 
     cap.release()
-    cv2.destroyAllWindows()
+    if not headless:
+        cv2.destroyAllWindows()
 
-    print("\n" + "=" * 60)
-    if len(samples) < 10:
-        print("樣本太少，無法統計。確認相機真的拍到計時器視窗、光柵沒被遮住。")
+    print("\n" + "=" * 62)
+    if len(samples) < 5:
+        print("樣本太少，無法統計。確認相機真的拍著閃爍視窗、且視窗夠大。")
         return 1
     arr = np.array(samples)
     med = float(np.median(arr))
     print(f"樣本數 {len(arr)}｜中位數 {med:.0f} ms｜平均 {arr.mean():.0f} ms｜"
-          f"標準差 {arr.std():.0f} ms")
-    print(f"\n>>> 把設定頁「圖傳延遲 ms」填入：{med:.0f}")
-    print("    （中位數比平均可靠：不受偶發掉幀影響）")
-    print("=" * 60)
+          f"標準差 {arr.std():.0f} ms｜範圍 {arr.min():.0f}~{arr.max():.0f} ms")
+
+    if headless:
+        # 量到的值必然略高於真值：偵測只能發生在「下一幀抵達」的瞬間，
+        # 所以會多算平均半個到一個幀週期（30fps ≈ 17~33ms）。
+        err = med - args.selftest
+        ok = -5.0 <= err <= 40.0
+        print(f"\n注入 {args.selftest:.0f} ms → 量到 {med:.0f} ms（差 {err:+.0f} ms）")
+        print("差值應落在 0~+33ms：偵測只能發生在下一幀抵達時，必然略為高估。")
+        print(f"{'✅ 量測邏輯正確' if ok else '❌ 量測邏輯有問題'}")
+        return 0 if ok else 1
+
+    # 偏差修正：偵測只能發生在「下一幀抵達」的瞬間，平均多算半個幀週期。
+    # 這個幀週期是量出來的，不是假設的。
+    gap_ms = float(np.median(frame_gaps)) * 1000.0 if frame_gaps else 0.0
+    suggest = max(0.0, med - gap_ms / 2.0)
+    print(f"\n擷取幀間隔中位數 {gap_ms:.0f} ms（約 {1000/gap_ms:.0f} fps）")
+    print(f"扣掉半個幀週期的量化偏差 → 建議值 {suggest:.0f} ms")
+    print(f"\n>>> 設定頁「圖傳延遲 ms」填：{suggest:.0f}")
+    print("    中位數比平均可靠（不受偶發掉幀拉高）。")
+    print("    殘留偏差：螢幕本身的顯示延遲（約 5~15ms）仍含在內，屬於高估。")
+    print("    不必追求個位數精度——這個量級的誤差在低速飛行下影響很小。")
+    print("=" * 62)
     return 0
 
 

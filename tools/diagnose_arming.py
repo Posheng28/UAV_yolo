@@ -57,6 +57,23 @@ EKF_FLAGS = [
 ]
 
 
+def decode_param(value: float, param_type: int):
+    """PARAM_VALUE.param_value 一律是 float32，但整數型參數是「把位元原封搬進去」。
+
+    不照 param_type 重新解讀的話，整數 4 會被印成 5.60519e-45 這種非正規化浮點
+    ——看起來像壞掉的浮點數，實際上是正常的整數。誤判過一次就知道多坑。
+    """
+    import struct
+
+    INT_TYPES = {1: "B", 2: "b", 3: "H", 4: "h", 5: "I", 6: "i"}  # MAV_PARAM_TYPE
+    fmt = INT_TYPES.get(param_type)
+    if fmt is None:
+        return value                      # REAL32 / REAL64：本來就是浮點
+    raw = struct.pack("<f", value)
+    size = struct.calcsize(fmt)
+    return struct.unpack_from("<" + fmt, raw[:size])[0]
+
+
 def parse_event(payload: bytes) -> dict | None:
     """手解 MAVLink EVENT（訊息 410）。
 
@@ -99,6 +116,8 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=15.0)
     ap.add_argument("--try-arm", action="store_true",
                     help="送出一次 arm 指令以取得拒絕理由（務必先拆槳）")
+    ap.add_argument("--params", action="store_true",
+                    help="讀取與 arm 相關的飛控參數（電池校正/門檻/斷路器）")
     args = ap.parse_args()
 
     print(f">>> 連線 {args.port} @ {args.baud}")
@@ -173,6 +192,55 @@ def main() -> int:
     print("\n" + "=" * 66)
     print(f"收到的訊息種類：" + "  ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
     print("=" * 66)
+
+    if args.params:
+        # 電壓分壓校正歪掉時，飛控會以為健康的電池是低電量——量測值與平衡頭
+        # 電表對不上就是這個症狀，而低電量會直接擋 arm。
+        wanted = [
+            "BAT1_V_DIV", "BAT1_N_CELLS", "BAT1_V_EMPTY", "BAT1_V_CHARGED",
+            "BAT1_CAPACITY", "BAT1_SOURCE",
+            "BAT_LOW_THR", "BAT_CRIT_THR", "BAT_EMERGEN_THR",
+            "CBRK_SUPPLY_CHK", "COM_ARM_WO_GPS", "COM_ARM_CHK_ESCS",
+            "COM_ARM_MAG_ANG", "COM_PREARM_MODE", "COM_DISARM_PRFLT",
+        ]
+        print("\n讀取參數中…")
+        got: dict[str, float] = {}
+        for name in wanted:
+            m.mav.param_request_read_send(m.target_system, m.target_component,
+                                          name.encode(), -1)
+        t_end = time.monotonic() + 6.0
+        while time.monotonic() < t_end and len(got) < len(wanted):
+            pm = m.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.4)
+            if pm is None:
+                continue
+            pid = pm.param_id
+            if isinstance(pid, (bytes, bytearray)):
+                pid = pid.decode("utf-8", "replace")
+            pid = pid.rstrip("\x00")
+            if pid in wanted:
+                got[pid] = decode_param(pm.param_value, pm.param_type)
+        for name in wanted:
+            v = got.get(name)
+            print(f"  {name:<18} {'(讀不到)' if v is None else f'{v:g}'}")
+
+        ncell = got.get("BAT1_N_CELLS")
+        vdiv = got.get("BAT1_V_DIV")
+        low_thr = got.get("BAT_LOW_THR")
+        bat = latest.get("BATTERY_STATUS")
+        if bat and ncell:
+            volt = sum(x for x in bat.voltages[:12] if 0 < x < 65535) / 1000.0
+            per_cell = volt / ncell
+            print(f"\n  飛控認為：{volt:.2f} V ÷ {ncell:g}S = 每 cell {per_cell:.2f} V"
+                  f"，剩餘 {bat.battery_remaining}%")
+            if low_thr is not None:
+                margin = bat.battery_remaining / 100.0 - low_thr
+                verdict = ("高於低電量門檻，電池不是 arm 被擋的原因"
+                           if margin > 0 else "已低於低電量門檻 → 會擋 arm")
+                print(f"  低電量門檻 {low_thr*100:.0f}%：{verdict}"
+                      f"（餘裕 {margin*100:+.0f} 個百分點）")
+            print(f"  對帳：拿平衡頭電表量總電壓。若電表比 {volt:.2f} V 明顯高，"
+                  f"就是 BAT1_V_DIV（目前 {vdiv:g}）校歪，")
+            print(f"        飛控會把健康電池當低電量。QGC → Power → 電池校正可修。")
 
     gps = latest.get("GPS_RAW_INT")
     if gps:

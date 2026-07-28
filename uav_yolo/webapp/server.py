@@ -204,10 +204,6 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 })
         return out
 
-    @app.get("/api/weights")
-    def list_weights():
-        return {"weights": _list_weights()}
-
     @app.get("/api/config")
     def get_config():
         weights = cfg.get("detector.weights") or DEFAULT_WEIGHTS_FILE

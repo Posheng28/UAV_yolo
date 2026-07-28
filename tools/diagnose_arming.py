@@ -118,6 +118,8 @@ def main() -> int:
                     help="送出一次 arm 指令以取得拒絕理由（務必先拆槳）")
     ap.add_argument("--params", action="store_true",
                     help="讀取與 arm 相關的飛控參數（電池校正/門檻/斷路器）")
+    ap.add_argument("--no-heartbeat", action="store_true",
+                    help="不發 GCS 心跳（對照組：重現「PX4 判定鏈路中斷而拒絕 arm」）")
     args = ap.parse_args()
 
     print(f">>> 連線 {args.port} @ {args.baud}")
@@ -148,8 +150,17 @@ def main() -> int:
     deadline = t0 + args.seconds
     arm_sent_at = None
     ack = None
+    last_hb = 0.0
+    print(f">>> GCS 心跳：{'不發（對照組）' if args.no_heartbeat else '每秒 1 次'}\n")
 
     while time.monotonic() < deadline:
+        # MAVLink 要求每個節點週期性發心跳；不發的話 PX4 會判定資料鏈路中斷
+        # （COM_DL_LOSS_T）→ failsafe → 拒絕 arm。這就是 --no-heartbeat 要重現的。
+        if not args.no_heartbeat and time.monotonic() - last_hb >= 1.0:
+            last_hb = time.monotonic()
+            m.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
+                                 mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                                 0, 0, mavutil.mavlink.MAV_STATE_ACTIVE)
         if args.try_arm and arm_sent_at is None and time.monotonic() - t0 > 4.0:
             print(">>> 送出 arm 指令（MAV_CMD_COMPONENT_ARM_DISARM, param1=1）…\n")
             m.mav.command_long_send(m.target_system, m.target_component,

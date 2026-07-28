@@ -267,8 +267,9 @@ class MavlinkConnection:
         self.raw_bytes = 0
         self.msgs_parsed = 0
         self.heartbeats_seen = 0
-        self.gcs_heartbeats_sent = 0   # 我們發出去的；0 代表 PX4 會判定鏈路中斷
+        self.gcs_heartbeats_sent = 0   # 我們發出去的；0 代表 PX4 不會對我們說話
         self._last_hb_sent_t = 0.0
+        self._text_chunks: dict[int, list[str]] = {}   # 多段 STATUSTEXT 重組用
         self.hb_wrong_comp = 0  # 收到心跳但來自非自駕儀元件（雲台/相機）
 
     # ---- 生命週期 ----
@@ -426,12 +427,23 @@ class MavlinkConnection:
 
             elif mtype == "STATUSTEXT":
                 # 飛控拒絕 arm 的理由（"Arming denied: ..."）只從這裡來。
+                # ⚠ 單則訊息上限 50 字元，超過會被切成多段（MAVLink2 的 id/chunk_seq
+                # 擴充欄位）。不重組就會看到「...health failures firs」「t」這種斷句，
+                # 而被截掉的往往正是關鍵字。
                 text = msg.text
                 if isinstance(text, (bytes, bytearray)):
                     text = text.decode("utf-8", "replace")
-                text = str(text).rstrip("\x00").strip()
-                if text:
-                    self.store.push_message(now, int(msg.severity), text)
+                text = str(text).rstrip("\x00")
+                chunk_id = int(getattr(msg, "id", 0) or 0)
+                if chunk_id:
+                    buf = self._text_chunks.setdefault(chunk_id, [])
+                    buf.append(text)
+                    if len(text) < 50:            # 未滿 50 = 最後一段
+                        joined = "".join(self._text_chunks.pop(chunk_id)).strip()
+                        if joined:
+                            self.store.push_message(now, int(msg.severity), joined)
+                elif text.strip():
+                    self.store.push_message(now, int(msg.severity), text.strip())
 
     GCS_HEARTBEAT_INTERVAL_S = 1.0
 

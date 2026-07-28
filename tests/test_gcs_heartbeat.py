@@ -93,3 +93,35 @@ def test_no_connection_is_a_noop():
     link._conn = None
     link._send_gcs_heartbeat()
     assert link.gcs_heartbeats_sent == 0
+
+
+# ---------------- 多段 STATUSTEXT 重組 ----------------
+
+def test_split_statustext_is_reassembled():
+    """STATUSTEXT 單則上限 50 字元，超過會切段；不重組就會漏掉關鍵字。
+
+    實機收到過：「Arming denied: Resolve system health failures firs」+「t」，
+    被截斷的正好是句尾。飛控唯一的解釋管道不能斷在一半。
+    """
+    from uav_yolo.mavlink_io.telemetry import TelemetryStore
+
+    store = TelemetryStore()
+    chunks = ["Arming denied: Resolve system health failures firs", "t"]
+    cid = 7
+    buf: dict[int, list[str]] = {}
+    for text in chunks:                      # 複刻接收端的重組邏輯
+        buf.setdefault(cid, []).append(text)
+        if len(text) < 50:
+            store.push_message(1.0, 2, "".join(buf.pop(cid)).strip())
+
+    msgs = store.recent_messages()
+    assert len(msgs) == 1, "切成兩段的訊息變成兩筆了"
+    assert msgs[0]["text"] == "Arming denied: Resolve system health failures first"
+
+
+def test_single_chunk_statustext_still_works():
+    from uav_yolo.mavlink_io.telemetry import TelemetryStore
+
+    store = TelemetryStore()
+    store.push_message(1.0, 2, "Preflight Fail: Avionics Power low: 4.57 Volt")
+    assert store.recent_messages()[0]["text"].endswith("4.57 Volt")

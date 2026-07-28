@@ -218,6 +218,61 @@ def section_c(cfg: Config, alt: float, vel_ne=(0.0, 0.0), label="靜止目標") 
     return ok
 
 
+def section_d(cam: CameraModel, cfg: Config) -> bool:
+    """無雲台時的姿態敏感度：機體姿態差 1 度，地面座標差多少？
+
+    沒有雲台，相機硬鎖機身，測地完全靠飛控回報的三軸姿態（程式有正確使用，
+    見 engine._camera_rotation）。所以真正的誤差來源不是「機體會傾斜」，
+    而是「回報的姿態不準」或「姿態與影像時間對不齊」。
+    這段用真實測地路徑量，不用近似公式。
+    """
+    from uav_yolo.geometry.frames import camera_rotation_body_mount
+
+    print(f"\n{'='*66}\nD. 無雲台：姿態誤差 → 地面誤差（用真實測地路徑量）\n{'='*66}")
+    mount = (0.0, math.radians(-90.0), 0.0)
+    u, v = cam.width / 2.0, cam.height / 2.0        # 畫面正中央的目標
+
+    print(f"  {'高度':>5} | " + " | ".join(f"姿態差{d}°" for d in (0.5, 1, 2, 5)))
+    print("  " + "-" * 56)
+    rows = {}
+    for alt in (4, 10, 20, 40, 80):
+        vehicle = np.array([0.0, 0.0, -float(alt)])
+        R0 = camera_rotation_body_mount(euler_zyx_to_R(0.0, 0.0, 0.0), *mount)
+        base = geolocate_pixel(u, v, cam, R0, vehicle)
+        errs = []
+        for deg in (0.5, 1, 2, 5):
+            R1 = camera_rotation_body_mount(
+                euler_zyx_to_R(0.0, math.radians(deg), 0.0), *mount)
+            got = geolocate_pixel(u, v, cam, R1, vehicle)
+            errs.append(float(np.linalg.norm(got[:2] - base[:2])))
+        rows[alt] = errs
+        print(f"  {alt:>4}m | " + " | ".join(f"{e:7.2f} m" for e in errs))
+
+    print("\n  → 誤差與高度成正比。飛低是這件事的最佳解：")
+    print(f"    4m 高、姿態差 2 度 → 只差 {rows[4][2]:.2f} m")
+    print(f"   40m 高、同樣差 2 度 → 差 {rows[40][2]:.2f} m（10 倍）")
+
+    # 圖傳延遲造成的姿態時間錯位：四軸機動時角速度可達 30~60 度/秒
+    print(f"\n  影像延遲造成的姿態錯位（未補償 latency_ms=0 時）：")
+    print(f"  {'延遲':>6} | {'角速度30°/s':>12} | {'角速度60°/s':>12}   (高度 4m)")
+    print("  " + "-" * 46)
+    veh4 = np.array([0.0, 0.0, -4.0])
+    # 基準要是「同一像素、姿態水平」的落點；直接取絕對距離會把
+    # 「畫面中心 ≠ 光學中心」的固定偏移算進誤差，數字會虛高
+    base4 = geolocate_pixel(
+        u, v, cam, camera_rotation_body_mount(euler_zyx_to_R(0.0, 0.0, 0.0), *mount), veh4)
+    for lat_ms in (50, 100, 150, 300):
+        e = []
+        for rate in (30, 60):
+            deg = rate * lat_ms / 1000.0
+            R1 = camera_rotation_body_mount(
+                euler_zyx_to_R(0.0, math.radians(deg), 0.0), *mount)
+            got = geolocate_pixel(u, v, cam, R1, veh4)
+            e.append(float(np.linalg.norm(got[:2] - base4[:2])))
+        print(f"  {lat_ms:>4}ms | {e[0]:>10.2f} m | {e[1]:>10.2f} m")
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="離線驗證測地與導引指令")
     ap.add_argument("--alt", type=float, default=None, help="假設飛行高度 m（預設用設定的跟隨高度）")
@@ -237,6 +292,7 @@ def main() -> int:
     results.append(("C1 導引・靜止目標", section_c(cfg, alt)))
     results.append(("C2 導引・目標往東北 3m/s",
                     section_c(cfg, alt, vel_ne=(2.1, 2.1), label="目標往東北移動")))
+    results.append(("D 無雲台姿態敏感度", section_d(cam, cfg)))
 
     print(f"\n{'='*66}")
     for name, ok in results:

@@ -216,6 +216,10 @@ class SimLink:
         self.world = world
         self.store = world.store
         self.error: str | None = None
+        # 模擬的是一顆理想的 MAVLink 雲台協定 v2 裝置：它推送的姿態在模型裡
+        # 就是相機真正的指向，不是指令角。實機上這個旗標由收到
+        # GIMBAL_DEVICE_INFORMATION 決定（見 telemetry.py）。
+        self.gimbal_information_seen = True
         self._realtime = realtime
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None

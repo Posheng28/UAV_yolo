@@ -270,6 +270,13 @@ class MavlinkConnection:
         self.gcs_heartbeats_sent = 0   # 我們發出去的；0 代表 PX4 不會對我們說話
         self._last_hb_sent_t = 0.0
         self._text_chunks: dict[int, list[str]] = {}   # 多段 STATUSTEXT 重組用
+        # 🔴 收到的雲台姿態是「實測」還是「飛控用指令角合成的」？
+        # PX4 在 MNT_MODE_OUT=0(AUX) 與 =1(v1) 兩種模式下，會拿**指令角**合成
+        # GIMBAL_DEVICE_ATTITUDE_STATUS 發布出來——長得跟實測值一模一樣。
+        # 真正的 v2 裝置才會送 GIMBAL_DEVICE_INFORMATION(283)；沒收到它，
+        # 就代表手上的姿態是指令值，對機械極限、模式切換、傾角保護全盲。
+        # 這個分辨用在測地上是關鍵：指令值在雲台轉動中或撞到極限時與現實差很多。
+        self.gimbal_information_seen = False
         self.hb_wrong_comp = 0  # 收到心跳但來自非自駕儀元件（雲台/相機）
 
     # ---- 生命週期 ----
@@ -391,6 +398,11 @@ class MavlinkConnection:
 
             elif mtype == "HOME_POSITION":
                 self.store.set_home(Home(lat=msg.latitude / 1e7, lon=msg.longitude / 1e7, alt_amsl=msg.altitude / 1000.0))
+
+            elif mtype == "GIMBAL_DEVICE_INFORMATION":
+                # 只有真正實作 MAVLink 雲台協定 v2 的裝置會送這則。收到它，
+                # 之後的 ATTITUDE_STATUS 才算得上實測值。
+                self.gimbal_information_seen = True
 
             elif mtype == "GIMBAL_DEVICE_ATTITUDE_STATUS":
                 w, x, y, z = msg.q

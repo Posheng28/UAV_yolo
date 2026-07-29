@@ -245,9 +245,19 @@ def check_gimbal(engine, cfg) -> CheckResult:
         return _r("gimbal", "雲台", "skip", "設定為無雲台／固定安裝")
     now = engine._last_capture_t or engine.clock()
     has_fb = engine.link.store.gimbal_at(now) is not None
-    if has_fb:
+    measured = engine.status().gimbal.get("attitude_measured", False)
+    if has_fb and measured:
         return _r("gimbal", "雲台", "pass",
-                  f"控制方式 {engine.gimbal_control}，有收到姿態回報（測地使用實際角度）")
+                  f"控制方式 {engine.gimbal_control}，收到**實測**姿態回報（測地使用實際角度）")
+    if has_fb and not measured:
+        # 收到姿態卻沒收到 GIMBAL_DEVICE_INFORMATION：這是 PX4 用指令角合成的，
+        # 不是雲台量到的。看起來一模一樣，但對機械極限/模式切換/傾角保護全盲。
+        return _r("gimbal", "雲台", "warn",
+                  f"控制方式 {engine.gimbal_control}，收到姿態但那是**指令角**不是實測值",
+                  "沒收到 GIMBAL_DEVICE_INFORMATION，代表雲台不支援 MAVLink 協定 v2，"
+                  "飛控是拿指令角合成的。雲台轉動中或撞到機械極限時，這個角度與現實不符，"
+                  "測地會偏。C-20T/CADDX GM3 屬於這一類",
+                  attitude_measured=False)
     if engine.gimbal_control == "roi":
         return _r("gimbal", "雲台", "warn",
                   "ROI 模式但沒收到雲台姿態回報（測地將無法解算）",

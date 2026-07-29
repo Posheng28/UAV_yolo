@@ -146,7 +146,13 @@ function renderStatus(st) {
     kvRow("數傳", v.link_ok ? "正常" : "斷線", v.link_ok ? "good" : "bad") +
     kvRow("高度(相對)", v.rel_alt !== null && v.rel_alt !== undefined ? fmt(v.rel_alt, 0) + " m" : "—") +
     kvRow("Home", v.home_set ? "已取得" : "未取得", v.home_set ? "good" : "bad") +
-    kvRow("雲台", st.gimbal.present ? `${st.gimbal.control}${st.gimbal.has_feedback ? "・有回報" : ""}` : "無") +
+    // 「有回報」不等於「實測」：PX4 會拿指令角合成同一則訊息，長得一模一樣。
+    // 測地精度差在這裡，所以標示要分得出來。
+    kvRow("雲台", st.gimbal.present
+      ? `${st.gimbal.control}${st.gimbal.has_feedback
+          ? (st.gimbal.attitude_measured ? "・實測角度" : "・僅指令角") : ""}`
+      : "無",
+      st.gimbal.present && st.gimbal.has_feedback && !st.gimbal.attitude_measured ? "bad" : "") +
     kvRow("處理速率", fmt(st.loop_hz, 0) + " Hz") +
     (st.mavlink && st.mavlink.backend === "lr24" && st.mavlink.lr24
       ? kvRow("LR24 指令",

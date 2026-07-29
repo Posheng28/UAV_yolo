@@ -774,6 +774,12 @@ class TrackerEngine:
                 "present": self.gimbal_present,
                 "control": self.gimbal_control,
                 "has_feedback": store.gimbal_at(self._last_capture_t or now) is not None,
+                # 🔴 收到姿態 ≠ 那是實測的。PX4 在 MNT_MODE_OUT=0/1 會拿指令角
+                # 合成同一則訊息發出來，長得一模一樣。真 v2 裝置才送
+                # GIMBAL_DEVICE_INFORMATION，沒有它就是指令值。
+                "attitude_measured": bool(getattr(self.link, "gimbal_information_seen", False)
+                                          or getattr(getattr(self.link, "telemetry", None),
+                                                     "gimbal_information_seen", False)),
             },
             loop_hz=round(loop_hz, 1),
             detector_error=self.detector_error,

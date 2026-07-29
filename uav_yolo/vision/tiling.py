@@ -35,6 +35,24 @@ import math
 Box = tuple[float, float, float, float]  # x1, y1, x2, y2
 
 
+def normalise_mode(value) -> str:
+    """把設定值正規化成 off / auto / on。
+
+    🔴 YAML 1.1 會把 `off` / `on` / `yes` / `no` 解析成**布林**，不是字串。
+    所以 `tiling: on` 讀進來是 `True`，跟字串 `"on"` 比對永遠不相等——
+    切塊不會啟動，而且完全沒有錯誤訊息。設定檔裡雖然已改成加引號，
+    但使用者手改或舊設定檔仍可能是布林，所以這裡一律接受兩種形式。
+    """
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    text = str(value).strip().lower()
+    if text in ("on", "true", "yes", "always"):
+        return "on"
+    if text in ("auto",):
+        return "auto"
+    return "off"
+
+
 def auto_grid(frame_w: int, frame_h: int, input_w: int, input_h: int,
               overlap: float = 0.2) -> tuple[int, int]:
     """算出「塊會被放大而不是縮小」的最小格數。

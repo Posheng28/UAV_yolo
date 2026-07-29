@@ -63,7 +63,7 @@ class Detector:
         self.allowed_names = class_names
         # 切塊推論：小目標的救命稻草。實測 8m 等效高度下整幀 0%、切塊 88%。
         # 詳見 tiling.py 開頭的量測表。
-        self.tiling = tiling            # off | auto | on
+        self.tiling = tiling            # off | auto | on（setter 會正規化）
         self.tile_grid = tile_grid
         self.tile_overlap = float(tile_overlap)
         self._last_boxes: list[tuple[float, float, float, float]] = []
@@ -73,6 +73,17 @@ class Detector:
         self.fallback_reason: str | None = None  # 想用 DirectML 卻退回 CPU 的原因
         self._model = None
         self._class_ids: set[int] | None = None
+
+    @property
+    def tiling(self) -> str:
+        return self._tiling
+
+    @tiling.setter
+    def tiling(self, value) -> None:
+        # YAML 把 off/on 讀成布林，直接拿去比字串會永遠不相等（靜默失效）
+        from .tiling import normalise_mode
+
+        self._tiling = normalise_mode(value)
 
     @property
     def is_onnx(self) -> bool:

@@ -10,6 +10,51 @@ from uav_yolo.vision.tiling import (auto_grid, iou, merge_detections,
                                     offset_boxes, should_tile, tile_rects)
 
 
+# ---------------- YAML 的 off/on 陷阱 ----------------
+
+def test_yaml_booleans_are_accepted():
+    """YAML 1.1 把裸的 off/on 讀成布林，不是字串。
+
+    實際踩到：default.yaml 寫 `tiling: off` → 讀進來是 `False` → 拿去跟
+    字串 "auto"/"on" 比對永遠不相等 → **使用者填 on 也不會啟動，且無錯誤訊息**。
+    """
+    from uav_yolo.vision.tiling import normalise_mode
+
+    assert normalise_mode(False) == "off"
+    assert normalise_mode(True) == "on", "YAML 的 `tiling: on` 讀成 True，必須等同 on"
+
+
+def test_mode_strings_are_accepted():
+    from uav_yolo.vision.tiling import normalise_mode
+
+    for v in ("off", "OFF", " off "):
+        assert normalise_mode(v) == "off"
+    for v in ("auto", "AUTO"):
+        assert normalise_mode(v) == "auto"
+    for v in ("on", "always", "yes", "true"):
+        assert normalise_mode(v) == "on"
+
+
+def test_unknown_value_falls_back_to_off():
+    """看不懂的值要退回最保守的行為，不要意外每幀都切塊拖垮迴圈。"""
+    from uav_yolo.vision.tiling import normalise_mode
+
+    assert normalise_mode("banana") == "off"
+    assert normalise_mode(None) == "off"
+
+
+def test_detector_normalises_on_assignment():
+    """熱套用設定時也要正規化，不然只有建構那次有保護。"""
+    from uav_yolo.vision.detector import Detector
+
+    d = Detector("weights/nope.pt", 0.5, 640, ["Car"], tiling=False)
+    assert d.tiling == "off"
+    d.tiling = True                      # 模擬 YAML 讀到 `tiling: on`
+    assert d.tiling == "on"
+    d.tiling = "auto"
+    assert d.tiling == "auto"
+
+
 # ---------------- 自動格數：切塊唯一的效果來源 ----------------
 
 def test_auto_grid_makes_tiles_smaller_than_the_model_input():

@@ -393,6 +393,19 @@ class TrackerEngine:
     def _camera_rotation(self, att, frame_t):
         """依設定/可用資料決定 R(相機→世界)。回 None 表示資訊不足。"""
         store = self.link.store
+
+        # 自穩雲台鎖定在「相對地面固定的角度」（如天底鎖定 LOOK-DOWN）：
+        # 相機朝向完全已知，不需要任何回報，也不該套用機身 roll/pitch
+        # ——那正是雲台已經穩定掉的部分，再套一次就是重複計算。
+        # 只有偏航跟著機身轉（C-20T 所有已記載的模式都是如此），所以 yaw
+        # 用機身航向加上安裝偏移。
+        if self.gimbal_attitude_source == "fixed_earth":
+            if att is None:
+                self.last_meas_note = "無機體航向（fixed_earth 需要 yaw）"
+                return None
+            yaw_offset, pitch, roll = self.mount_rad   # mount_rad 是 (yaw, pitch, roll)
+            return camera_rotation_gimbal_earth(att.yaw + yaw_offset, pitch, roll)
+
         if self.gimbal_present and self.gimbal_control != "none":
             gs = store.gimbal_at(frame_t) if self.gimbal_attitude_source in ("auto", "feedback") else None
             if gs is not None:

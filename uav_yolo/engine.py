@@ -379,10 +379,19 @@ class TrackerEngine:
                     # 「無 GPS 位置」，但飛控其實定位得好好的——那正是這段程式要
                     # 避免的誤導，只是先前漏了位置這一項。
                     clock_now = self.clock()
+                    # 🔴 導引與狀態機不能掛在「有沒有影像幀」上。實機任務踩到：
+                    # 操作員在 COAST（估計還活著）時啟用導引，影像恰好在那一刻
+                    # 停格 6.5 秒——導引評估只在收到幀時執行，於是唯一可發射的
+                    # 窗口整個被吃掉，coast 過期自動解鎖，事後閘門顯示的還是
+                    # 停格前的過期理由。影像斷線時：KF 外推正是該頂上的東西，
+                    # 狀態機要照走（COAST→LOST 判定）、導引要照發（用預測位置）。
+                    self.estimator.predict_to(clock_now)
+                    self._update_state_machine(clock_now, False)
+                    self._run_guidance(clock_now)
                     self._publish_status(
                         clock_now, [], self.link.store.position_at(clock_now))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self.loop_error = f"{type(exc).__name__}: {exc}"
             return False
         self._last_frame_t = frame_t
         now = self.clock()
@@ -921,6 +930,10 @@ class TrackerEngine:
                          round(float(self.estimator.speed), 1)]
                         if self.estimator.initialized else None),
                 "dets": len(status.detections),
+                # 影像狀態必須進快照：上次覆盤時分不出「相機沒看到車」和
+                # 「影像根本沒進來」，兩者的處置完全不同
+                "video": [bool(status.video.get("connected")),
+                          round(float(status.video.get("fps") or 0.0), 1)],
                 "gates": list(self.gate_report_blocked),
                 "note": self.guidance_note or None,
                 "latched": self.gates.pilot_override_latched,

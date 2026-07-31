@@ -8,6 +8,9 @@ system:
   mode: sim             # sim=模擬（無硬體，安全預設）| live=實機。用 UI 設定頁切換＋重啟引擎
   web_host: 127.0.0.1
   web_port: 8610
+  # 任務記錄：每次「啟用導引」自動開一份 JSONL（指令/ACK/狀態快照/閘門），
+  # 關閉導引或引擎停止時收尾。覆盤「那趟為什麼沒追」全靠它。
+  mission_log_dir: data/missions
 
 vehicle:
   airframe: multirotor  # multirotor=旋翼機 | fixedwing=固定翼

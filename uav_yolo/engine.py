@@ -85,6 +85,8 @@ class EngineStatus:
     detector_error: str | None = None  # 推論丟例外＝畫面看似沒車，必須讓操作員看到
     loop_error: str | None = None      # 迴圈本體例外（比偵測失敗更嚴重）
     alt_clamp_note: str | None = None  # 設定的導引高度被安全上下限夾掉時的說明
+    commands: list = field(default_factory=list)  # 最近發出的導引指令（新→舊，含 ACK）
+    mission_log: str | None = None     # 任務記錄檔名（導引啟用中才有）
 
 
 class TrackerEngine:
@@ -163,6 +165,7 @@ class TrackerEngine:
         self.last_meas_note = ""
         self.detector_error: str | None = None
         self.loop_error: str | None = None
+        self.cmd_history: deque = deque(maxlen=15)   # 最近發出的導引指令（UI 顯示）
         self.last_known_lla: tuple[float, float] | None = None
         self.gate_report_blocked: list[str] = []
         self.guidance_note = ""
@@ -192,6 +195,7 @@ class TrackerEngine:
         self._thread.start()
 
     def stop(self) -> None:
+        self._mission_close("引擎停止")
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3.0)
@@ -273,6 +277,7 @@ class TrackerEngine:
         return applied
 
     def set_guidance_enabled(self, enabled: bool) -> None:
+        was = self.guidance_enabled
         self.guidance_enabled = bool(enabled)
         if enabled:
             self.gates.reset_override()  # 重新啟用 = 飛行員把控制權交回來
@@ -280,6 +285,74 @@ class TrackerEngine:
             # 的舊指令點來比，目標若沒怎麼移動就整個不發——閘門全綠但飛機不動，
             # 而飛行員接管期間可能已經把機體飛到別處了。
             self.last_cmd = None
+            if not was:
+                self._mission_open()
+        elif was:
+            self._mission_close("操作員關閉導引")
+
+    # ---------------- 任務記錄（導引開＝開檔、導引關＝收尾） ----------------
+    #
+    # 指令歷史放記憶體的話 server 一重啟就沒了；而「這趟到底發了什麼、
+    # 飛控回了什麼、閘門什麼時候擋」正是飛完要覆盤的東西。每次啟用導引
+    # 就開一份 JSONL，逐行 flush（當機也不掉資料），關導引寫入摘要收尾。
+
+    def _mission_dir(self) -> "Path":
+        from pathlib import Path
+
+        d = Path(self.cfg.get("system.mission_log_dir", "data/missions"))
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _mission_open(self) -> None:
+        import json
+        from pathlib import Path
+
+        try:
+            name = time.strftime("mission_%Y%m%d_%H%M%S.jsonl")
+            self._mission_path = self._mission_dir() / name
+            self._mission_fh = open(self._mission_path, "a", encoding="utf-8")
+            self._mission_snap_t = 0.0
+            self._mission_write("guidance_on", {
+                "airframe": self.airframe,
+                "follow_alt_m": getattr(self.guidance, "follow_alt_m",
+                                        getattr(self.guidance, "alt_m", None)),
+                "standoff_m": getattr(self.guidance, "standoff_m", None),
+                "max_speed_ms": getattr(self.guidance, "max_speed_ms", None),
+                "weights": getattr(self.detector, "weights_path", None),
+                "tiling": getattr(self.detector, "tiling", None),
+            })
+        except Exception as exc:      # 記錄失敗不能擋任務，但要看得到
+            self.loop_error = f"任務記錄開檔失敗：{exc}"
+            self._mission_fh = None
+            self._mission_path = None
+
+    def _mission_close(self, reason: str) -> None:
+        if getattr(self, "_mission_fh", None) is None:
+            return
+        self._mission_write("guidance_off", {
+            "reason": reason,
+            "commands_sent": len(self.cmd_history),
+            "pilot_override_latched": self.gates.pilot_override_latched,
+        })
+        try:
+            self._mission_fh.close()
+        except Exception:
+            pass
+        self._mission_fh = None
+        self._mission_path = None
+
+    def _mission_write(self, event: str, payload: dict) -> None:
+        if getattr(self, "_mission_fh", None) is None:
+            return
+        import json
+
+        try:
+            rec = {"event": event, "t": round(self.clock(), 3),
+                   "wall": time.strftime("%H:%M:%S"), **payload}
+            self._mission_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            self._mission_fh.flush()   # 逐行落盤：當機/斷電也不掉已寫的
+        except Exception:
+            pass
 
     def manual_lock(self, track_id: int) -> None:
         self.lock.request_manual_lock(track_id)
@@ -606,6 +679,22 @@ class TrackerEngine:
             t=now, lat=lat, lon=lon, alt_rel=cmd.alt_rel_m,
             point_ne=cmd.point_ne.copy(), label=cmd.label, radius=cmd.loiter_radius_m,
         )
+        # 指令記錄：操作員必須看得到「到底發了什麼、飛控回了什麼」。
+        # 只留 last_cmd 的話，「鎖定了卻沒動」會被誤判成系統壞掉，
+        # 實際上可能只是導引沒開、閘門在擋、或飛控拒收。
+        rec = {
+            "t": now,
+            "wall": time.strftime("%H:%M:%S"),
+            "n": round(float(cmd.point_ne[0]), 1),
+            "e": round(float(cmd.point_ne[1]), 1),
+            "lat": round(lat, 7), "lon": round(lon, 7),
+            "alt_rel": round(float(cmd.alt_rel_m), 1),
+            "speed": None if cmd.speed_ms is None else round(float(cmd.speed_ms), 1),
+            "label": cmd.label,
+            "ack": None,   # 由 _publish_status 用 COMMAND_ACK 回填
+        }
+        self.cmd_history.append(rec)
+        self._mission_write("command", {k: v for k, v in rec.items() if k != "ack"})
 
     def _run_gimbal(self, now: float, pos) -> None:
         if not self.gimbal_present or self.gimbal_control == "none":
@@ -799,6 +888,43 @@ class TrackerEngine:
             loop_error=self.loop_error,
             alt_clamp_note=self.alt_clamp_warning(),
         )
+        # 回填 COMMAND_ACK：DO_REPOSITION=192。ACK 晚於發送抵達，所以每次發布
+        # 狀態時都對「ACK 時間之前最近的一筆」補上結果。
+        ack = getattr(self.link, "last_ack", {}).get(192) or getattr(
+            getattr(self.link, "telemetry", None), "last_ack", {}).get(192)
+        if ack is not None:
+            names = {0: "ACCEPTED", 1: "TEMP_REJECTED", 2: "DENIED",
+                     3: "UNSUPPORTED", 4: "FAILED", 5: "IN_PROGRESS"}
+            result, ack_t = ack
+            for rec in reversed(self.cmd_history):
+                if rec["t"] <= ack_t:
+                    rec["ack"] = names.get(int(result), str(result))
+                    break
+        status.commands = [dict(r, ago=round(now - r["t"], 1))
+                           for r in reversed(self.cmd_history)]
+        status.mission_log = (str(self._mission_path.name)
+                              if getattr(self, "_mission_path", None) else None)
+
+        # 任務記錄：每 0.5 秒一筆完整狀態快照（含閘門），覆盤時才知道
+        # 「那 8 秒為什麼沒發指令」是誰擋的
+        if getattr(self, "_mission_fh", None) is not None and now - self._mission_snap_t >= 0.5:
+            self._mission_snap_t = now
+            self._mission_write("snap", {
+                "state": self.state,
+                "mode": status.vehicle.get("mode"),
+                "armed": status.vehicle.get("armed"),
+                "link_ok": status.vehicle.get("link_ok"),
+                "veh": [status.vehicle.get("lat"), status.vehicle.get("lon"),
+                        status.vehicle.get("rel_alt")],
+                "tgt": ([round(float(self.estimator.pos_ne[0]), 1),
+                         round(float(self.estimator.pos_ne[1]), 1),
+                         round(float(self.estimator.speed), 1)]
+                        if self.estimator.initialized else None),
+                "dets": len(status.detections),
+                "gates": list(self.gate_report_blocked),
+                "note": self.guidance_note or None,
+                "latched": self.gates.pilot_override_latched,
+            })
         status.vehicle["path"] = list(self.vehicle_path)[-200:]
         status.target["path"] = list(self.target_path)[-200:]
         with self._status_lock:
@@ -810,6 +936,10 @@ class TrackerEngine:
         # 高度夾制警告來自設定、不是量測，所以不該等到跑完一幀才出現：
         # 影像還沒進來（或斷線）時操作員最需要看到「你填的高度不會生效」。
         status.alt_clamp_note = self.alt_clamp_warning()
+        # 同理：任務記錄狀態要即時，關導引的瞬間 UI 就該把「記錄中」拿掉，
+        # 不能等下一幀影像進來才更新
+        status.mission_log = (str(self._mission_path.name)
+                              if getattr(self, "_mission_path", None) else None)
         return status
 
 

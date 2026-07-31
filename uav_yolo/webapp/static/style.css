@@ -151,6 +151,16 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .fc-msg.sev-warn { background: var(--amber-soft, #fdf0d5); color: var(--amber, #a15c00); }
 .fc-msg.sev-err { background: var(--red-soft); color: var(--red); font-weight: 700; }
 
+/* 已發送指令記錄 */
+.cmd-log { margin-top: 4px; display: flex; flex-direction: column; gap: 3px;
+           max-height: 170px; overflow-y: auto; }
+.cmd-row { font-size: .86rem; padding: 3px 8px; border-radius: 6px;
+           background: var(--sky-soft); white-space: nowrap; }
+.cmd-row .ack { float: right; font-weight: 700; }
+.cmd-row .ack.ok { color: var(--green); }
+.cmd-row .ack.bad { color: var(--red); }
+.cmd-row .ack.wait { color: var(--blue); font-weight: 400; }
+
 /* ---------- 資訊區 ---------- */
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: .95rem; }
 .kv .k { color: var(--mut); white-space: nowrap; }

@@ -102,6 +102,26 @@ function renderStatus(st) {
 
   // 最後指令
   const lc = st.last_command;
+  // 任務記錄指示：導引啟用中會逐行寫入 data/missions/<檔名>.jsonl
+  const ml = $("#mission-log");
+  ml.hidden = !st.mission_log;
+  if (st.mission_log) ml.textContent = `⏺ 任務記錄中：data/missions/${st.mission_log}`;
+
+  // 已發送指令記錄：沒有這個，「鎖定了卻沒動」只能瞎猜是導引沒開、
+  // 閘門在擋、還是飛控拒收——三種原因的處置完全不同。
+  const log = $("#cmd-log");
+  const cmds = st.commands || [];
+  $("#cmd-count").textContent = cmds.length ? `${cmds.length} 筆` : "";
+  if (cmds.length) {
+    log.innerHTML = cmds.slice(0, 8).map((c) => {
+      const ackCls = c.ack === "ACCEPTED" ? "ok" : (c.ack ? "bad" : "wait");
+      const ackTxt = c.ack || "等待ACK";
+      const spd = c.speed !== null && c.speed !== undefined ? `｜${c.speed}m/s` : "";
+      return `<div class="cmd-row"><span class="mut">${c.wall}</span> ` +
+        `N${c.n >= 0 ? "+" : ""}${c.n} E${c.e >= 0 ? "+" : ""}${c.e}｜${c.alt_rel}m${spd} ` +
+        `<span class="ack ${ackCls}">${ackTxt}</span></div>`;
+    }).join("");
+  }
   $("#last-cmd").textContent = lc
     ? `最後指令 ${lc.label}：(${fmt(lc.lat, 6)}, ${fmt(lc.lon, 6)}) 高度 ${fmt(lc.alt_rel, 0)}m` +
       (lc.radius ? ` 半徑 ${fmt(lc.radius, 0)}m` : "") + `（${fmt(lc.age_s, 0)} 秒前）`

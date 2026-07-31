@@ -141,6 +141,12 @@ def _open_with_timeout(open_fn, timeout_s: float):
     return None
 
 
+# FFMPEG 選項走「行程級」環境變數：設定頁的 probe（HTTP 執行緒）與引擎的
+# 自動重連（擷取執行緒）同時開 RTSP 時會互蓋 transport/timeout。序列化整段
+# 「設環境變數 → 建 VideoCapture」；鎖最多持有 timeout_s（開啟本身有限時）。
+_ffmpeg_env_lock = threading.Lock()
+
+
 def open_rtsp(
     url: str, transport: str, backend: str = "auto", timeout_s: float = 5.0
 ) -> tuple[cv2.VideoCapture | None, str]:
@@ -162,10 +168,11 @@ def open_rtsp(
     # （實測會噴 "Stream timeout triggered after 30042ms"）。真正的旋鈕是這兩個
     # OpenCV 層級環境變數，必須在建立 VideoCapture 前設好。
     timeout_ms = str(int(timeout_s * 1000))
-    os.environ["OPENCV_FFMPEG_OPEN_TIMEOUT_MS"] = timeout_ms
-    os.environ["OPENCV_FFMPEG_READ_TIMEOUT_MS"] = timeout_ms
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_rtsp_options(transport, timeout_s)
-    cap = _open_with_timeout(lambda: cv2.VideoCapture(url, cv2.CAP_FFMPEG), timeout_s)
+    with _ffmpeg_env_lock:
+        os.environ["OPENCV_FFMPEG_OPEN_TIMEOUT_MS"] = timeout_ms
+        os.environ["OPENCV_FFMPEG_READ_TIMEOUT_MS"] = timeout_ms
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_rtsp_options(transport, timeout_s)
+        cap = _open_with_timeout(lambda: cv2.VideoCapture(url, cv2.CAP_FFMPEG), timeout_s)
     if cap is None:
         return None, f"RTSP 連線逾時 {timeout_s:.0f}s（{transport}）"
     if cap.isOpened():
@@ -369,8 +376,17 @@ class VideoSource:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2.0)
+        # cap 的釋放歸擷取執行緒所有（_capture_loop 的 finally）。join 逾時代表
+        # 執行緒還卡在 cap.read()（RTSP 斷線時可長達數秒）——這時從別的執行緒
+        # release() 同一個 cap 是對使用中物件動手，OpenCV 會直接當掉整個行程。
+        if self._thread is not None and self._thread.is_alive():
+            return
         if self._cap:
-            self._cap.release()
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
         self.connected = False
 
     def _reconnect(self) -> None:
@@ -383,6 +399,10 @@ class VideoSource:
             except Exception:
                 pass
             self._cap = None
+        # stop() 之後不該再開新裝置：晚到的重連會把相機重新佔住，
+        # 下一個引擎（重啟流程）開同一台就 busy。
+        if self._stop.is_set():
+            return
         try:
             cap = self._open()
         except Exception as exc:
@@ -394,10 +414,25 @@ class VideoSource:
             self.error = None
 
     def _capture_loop(self) -> None:
+        try:
+            self._capture_loop_inner()
+        finally:
+            # 執行緒是 cap 的擁有者：自己收尾，stop() 只在確定執行緒
+            # 已結束時才代為釋放（見 stop() 的說明）。
+            if self._cap:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+            self.connected = False
+
+    def _capture_loop_inner(self) -> None:
         fps_t0 = time.monotonic()
         fps_n = 0
         last_good = time.monotonic()
         stall_timeout = float(self.cfg.get("stall_timeout_s", 4.0))
+        file_rewinds = 0
         while not self._stop.is_set():
             try:
                 ok, frame = (self._cap.read() if self._cap else (False, None))
@@ -424,11 +459,18 @@ class VideoSource:
             if not ok or frame is None:
                 if self.mode == "file" and self._cap is not None:
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 影片檔循環播放
+                    # 損壞/空影片會讓「讀失敗→倒帶→讀失敗」變成無 sleep 的
+                    # 忙迴圈，吃滿一顆核心還不報錯。連續倒帶仍讀不到就要說。
+                    file_rewinds += 1
+                    if file_rewinds >= 3:
+                        self.error = f"影片檔讀不到任何幀：{self.device_label}"
+                        time.sleep(0.5)
                     continue
                 time.sleep(0.5)
                 self._reconnect()  # 圖傳中斷自動重連
                 continue
 
+            file_rewinds = 0
             with self._lock:
                 self._frame = frame
                 self._frame_t = now

@@ -125,10 +125,14 @@ def merge_detections(items: list[tuple[Box, str, float]],
 
     以信心排序後貪婪保留：與已保留框重疊超過門檻的就丟棄。同一個物體被
     相鄰兩塊各偵測一次時，重疊會很高，因此會被正確合併成一個。
+
+    去重**跨類別**：COCO 權重常把同一台車在不同塊各判成 car/truck，
+    若只在同類別內去重，一台車會留兩個高度重疊的框——追蹤器開兩條
+    track，鎖定會在兩個 ID 間跳。空間上高度重疊必是同一物體。
     """
     kept: list[tuple[Box, str, float]] = []
     for box, cls_name, conf in sorted(items, key=lambda it: it[2], reverse=True):
-        if any(cls_name == k[1] and iou(box, k[0]) > iou_threshold for k in kept):
+        if any(iou(box, k[0]) > iou_threshold for k in kept):
             continue
         kept.append((box, cls_name, conf))
     return kept

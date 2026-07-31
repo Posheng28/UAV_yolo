@@ -157,9 +157,19 @@ def test_two_real_cars_are_not_merged():
     assert len(merge_detections([a, b])) == 2
 
 
-def test_different_classes_are_never_merged():
+def test_cross_class_overlap_is_merged():
+    # COCO 權重常把同一台車在不同塊各判成 Car/Truck：空間高度重疊必是
+    # 同一物體，須合併成一個（留信心較高者），否則追蹤器開兩條 track。
     a = ((100.0, 100.0, 200.0, 200.0), "Car", 0.9)
     b = ((101.0, 101.0, 199.0, 199.0), "Truck", 0.8)
+    merged = merge_detections([a, b])
+    assert len(merged) == 1
+    assert merged[0][1] == "Car"  # 信心高者勝出
+
+
+def test_non_overlapping_different_classes_both_kept():
+    a = ((100.0, 100.0, 200.0, 200.0), "Car", 0.9)
+    b = ((500.0, 500.0, 600.0, 600.0), "Truck", 0.8)
     assert len(merge_detections([a, b])) == 2
 
 

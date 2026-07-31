@@ -46,9 +46,12 @@ def test_position_interpolation():
     mid = store.position_at(1.0)
     assert mid.lat == pytest.approx(24.0001, abs=1e-9)
     assert mid.rel_alt == pytest.approx(52.0, abs=1e-9)
-    # 超出範圍取端點
+    # 早於第一筆取端點；小幅前向外推（新鮮度內）也取端點
     assert store.position_at(-5.0).rel_alt == 50.0
-    assert store.position_at(99.0).rel_alt == 54.0
+    assert store.position_at(2.5).rel_alt == 54.0
+    # 🔴 超出新鮮度上限＝資料斷流，必須回 None——不能拿凍結位姿續飛測地
+    # （機體 12 m/s 續飛時，回放舊端點會逐幀漂移、騙過 KF 閘門）
+    assert store.position_at(99.0) is None
 
 
 def test_link_alive_timeout():

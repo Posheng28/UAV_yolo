@@ -214,9 +214,14 @@ class Lr24CommandChannel:
                     # 逾時或被拒（busy / 尚未 ready / GPS gate）→ 重排重試。
                     # 引擎有 deadband，目標不動就不會再呼叫 send_reposition，
                     # 這裡不重試的話「一次 ERR 就再也不送」，靜止目標將永遠收不到指令。
+                    # ⚠ 重排必須刷新時間戳：帶原 queued_at 的話，一次 8s 逾時
+                    # ＋1s backoff 後第二次取出就 >goto_max_age_s，被 stale 丟棄
+                    # ——「重試」實際上最多只做一次就永久靜默。staleness 防的是
+                    # 「在佇列裡等太久的舊願望」；重試中的目標仍是引擎的最新
+                    # 願望（有更新的話 _pending_goto 早被覆蓋、這裡不會重排）。
                     with self._lock:
                         if self._pending_goto is None:  # 沒有更新的目標才重排
-                            self._pending_goto = goto
+                            self._pending_goto = (lat, lon, alt, ref, time.monotonic())
                             self.retry_count += 1
                     time.sleep(self.retry_backoff_s)
             elif time.monotonic() - last_status >= self.status_interval_s:
@@ -286,6 +291,8 @@ class Lr24CommandChannel:
             "sent": self.sent_count,
             "ack": self.ack_count,
             "err": self.err_count,
+            "retry": self.retry_count,
+            "dropped_stale": self.dropped_stale,
             "last_sent": self.last_sent_frame,
             "last_response": (
                 f"{self.last_response.frame_type}:{self.last_response.message}"

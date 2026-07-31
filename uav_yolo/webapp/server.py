@@ -57,6 +57,7 @@ class EngineManager:
         self.cfg = cfg
         self._lock = threading.Lock()
         self.engine = None
+        self.error: str | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -64,12 +65,26 @@ class EngineManager:
             self.engine.start()
 
     def restart(self) -> None:
+        """重建引擎。失敗時 engine 保持 None、錯誤存起來給 /api/status。
+
+        順序很重要：先把 engine 摘成 None 再停舊的——重建中/失敗後，
+        /api/status 才會誠實回 ready:false，而不是拿「已停止的舊引擎」
+        繼續回快照（畫面凍結、狀態卻顯示 TRACK，操作員以為一切正常）。
+        舊引擎必須先停乾淨才能建新的：相機與序列埠都是獨占資源。
+        """
         with self._lock:
-            if self.engine is not None:
-                self.engine.stop()
+            old, self.engine = self.engine, None
+            if old is not None:
+                old.stop()
             self.cfg.reload()
-            self.engine = create_engine(self.cfg)
-            self.engine.start()
+            try:
+                eng = create_engine(self.cfg)
+                eng.start()
+            except Exception as exc:
+                self.error = f"引擎重啟失敗：{type(exc).__name__}: {exc}"
+                raise
+            self.engine = eng
+            self.error = None
 
 
 def create_app(cfg: Config | None = None) -> FastAPI:
@@ -151,28 +166,42 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def status():
         engine = manager.engine
         if engine is None:
-            return {"ready": False, "ui_version": ui_version}
+            # restart 失敗時要把原因端出來，不能只回 ready:false 讓人猜
+            return {"ready": False, "ui_version": ui_version, "error": manager.error}
         data = dataclasses.asdict(engine.status())
         data["ready"] = True
         data["ui_version"] = ui_version
         return data
 
+    # 變更引擎狀態的端點：引擎不在（重啟中/重啟失敗）就回 409，
+    # 不能默默回 ok:true 讓前端以為指令已生效。
+
     @app.post("/api/guidance")
     def set_guidance(body: dict = Body(...)):
-        if manager.engine:
-            manager.engine.set_guidance_enabled(bool(body.get("enabled")))
+        engine = manager.engine
+        if engine is None:
+            return JSONResponse({"ok": False, "error": "引擎未就緒"}, status_code=409)
+        engine.set_guidance_enabled(bool(body.get("enabled")))
         return {"ok": True}
 
     @app.post("/api/lock")
     def lock(body: dict = Body(...)):
-        if manager.engine and "track_id" in body:
-            manager.engine.manual_lock(int(body["track_id"]))
+        engine = manager.engine
+        if engine is None:
+            return JSONResponse({"ok": False, "error": "引擎未就緒"}, status_code=409)
+        if "track_id" not in body:
+            return JSONResponse({"ok": False, "error": "缺 track_id"}, status_code=400)
+        err = engine.manual_lock(int(body["track_id"]))
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=409)
         return {"ok": True}
 
     @app.post("/api/unlock")
     def unlock():
-        if manager.engine:
-            manager.engine.unlock()
+        engine = manager.engine
+        if engine is None:
+            return JSONResponse({"ok": False, "error": "引擎未就緒"}, status_code=409)
+        engine.unlock()
         return {"ok": True}
 
     # ---------------- 設定 ----------------

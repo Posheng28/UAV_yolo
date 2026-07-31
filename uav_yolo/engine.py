@@ -88,6 +88,7 @@ class EngineStatus:
     commands: list = field(default_factory=list)  # 最近發出的導引指令（新→舊，含 ACK）
     mission_log: str | None = None     # 任務記錄檔名（導引啟用中才有）
     latched: bool = False              # 飛行員接管閂鎖：UI 要顯示專用的恢復按鈕
+    seq: int = 0                       # 發布序號：前端偵測「引擎凍結但 HTTP 還活著」用
 
 
 class TrackerEngine:
@@ -134,6 +135,7 @@ class TrackerEngine:
         self.reposition_deadband_m = float(
             cfg.get(f"guidance.{deadband_key}.reposition_deadband_m", 3.0)
         )
+        self.cmd_refresh_s = float(cfg.get("guidance.cmd_refresh_s", 20.0))
 
         from .vision.detector import TargetLock
 
@@ -164,9 +166,14 @@ class TrackerEngine:
         self.last_roi_t: float | None = None
         self.last_gimbal_cmd: tuple[float, float] | None = None  # (pitch_rad, yaw_rad)
         self.last_meas_note = ""
+        # 從空集合起始（而非 None）：引擎還沒處理過任何幀時，任何手動鎖定
+        # 都該被拒絕——否則驗證被 getattr 預設值跳過，亂點 ID 也回 ok。
+        self._last_track_ids: set[int] = set()
         self.detector_error: str | None = None
         self.loop_error: str | None = None
         self.cmd_history: deque = deque(maxlen=15)   # 最近發出的導引指令（UI 顯示）
+        self.cmd_total = 0                            # 本任務累計（deque 會截頂，不能拿 len 當計數）
+        self._mission_lock = threading.Lock()         # 開/關/寫跨 HTTP 與迴圈執行緒
         self.last_known_lla: tuple[float, float] | None = None
         self.gate_report_blocked: list[str] = []
         self.guidance_note = ""
@@ -196,10 +203,12 @@ class TrackerEngine:
         self._thread.start()
 
     def stop(self) -> None:
-        self._mission_close("引擎停止")
+        # 先停迴圈執行緒、再收任務記錄：反過來的話 join 前迴圈可能還在跑
+        # 半輪，對已關閉的檔繼續寫 snap/command——那些事件全數落空。
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3.0)
+        self._mission_close("引擎停止")
         self.video.stop()
         if hasattr(self.link, "stop"):
             self.link.stop()
@@ -231,12 +240,19 @@ class TrackerEngine:
         self.gates.update_limits(self._safety_cfg(), cfg.get("guidance.rate_hz", 1.0))
         applied.append("safety")
 
-        # 導引參數（載體種類仍需重啟，這裡只換同載體的數值）
+        # 導引參數（載體種類仍需重啟，這裡只換同載體的數值）。
+        # 運行狀態要搬過去：standoff 的方位閂鎖（_last_bearing）若被重設回
+        # 預設值（正南），存一個無關設定就會讓靜止目標的跟隨點瞬間跳 ~21m，
+        # 飛機無預警繞目標重新定位。gates 用 in-place update 就是同一個理由。
+        old_guidance = self.guidance
         self.guidance = build_guidance(self.airframe, cfg.section("guidance"))
+        if hasattr(old_guidance, "_last_bearing") and hasattr(self.guidance, "_last_bearing"):
+            self.guidance._last_bearing = old_guidance._last_bearing
         deadband_key = "fixedwing" if self.airframe == "fixedwing" else "multirotor"
         self.reposition_deadband_m = float(
             cfg.get(f"guidance.{deadband_key}.reposition_deadband_m", 3.0)
         )
+        self.cmd_refresh_s = float(cfg.get("guidance.cmd_refresh_s", 20.0))
         applied.append("guidance")
         # 存檔當下就要講：填 4m 卻被夾成 20m，等飛上去才發現就太遲了
         alt_warn = self.alt_clamp_warning()
@@ -304,15 +320,18 @@ class TrackerEngine:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _mission_open(self) -> None:
-        import json
-        from pathlib import Path
+    # 開/關/寫都可能同時來自 HTTP 執行緒（導引開關）與迴圈執行緒（snap/
+    # command）：不加鎖的話「關檔」與「寫入」交錯會對已關閉的檔案物件寫入，
+    # 或半行 JSON 撕裂。鎖只包 I/O，粒度極小，不影響迴圈速率。
 
+    def _mission_open(self) -> None:
         try:
-            name = time.strftime("mission_%Y%m%d_%H%M%S.jsonl")
-            self._mission_path = self._mission_dir() / name
-            self._mission_fh = open(self._mission_path, "a", encoding="utf-8")
-            self._mission_snap_t = 0.0
+            with self._mission_lock:
+                name = time.strftime("mission_%Y%m%d_%H%M%S.jsonl")
+                self._mission_path = self._mission_dir() / name
+                self._mission_fh = open(self._mission_path, "a", encoding="utf-8")
+                self._mission_snap_t = 0.0
+                self.cmd_total = 0
             self._mission_write("guidance_on", {
                 "airframe": self.airframe,
                 "follow_alt_m": getattr(self.guidance, "follow_alt_m",
@@ -324,39 +343,59 @@ class TrackerEngine:
             })
         except Exception as exc:      # 記錄失敗不能擋任務，但要看得到
             self.loop_error = f"任務記錄開檔失敗：{exc}"
-            self._mission_fh = None
-            self._mission_path = None
+            with self._mission_lock:
+                self._mission_fh = None
+                self._mission_path = None
 
     def _mission_close(self, reason: str) -> None:
         if getattr(self, "_mission_fh", None) is None:
             return
         self._mission_write("guidance_off", {
             "reason": reason,
-            "commands_sent": len(self.cmd_history),
+            # cmd_history 是 maxlen=15 的 deque，len() 封頂後永遠 15；
+            # 覆盤要的是本任務真正發了幾筆
+            "commands_sent": self.cmd_total,
             "pilot_override_latched": self.gates.pilot_override_latched,
         })
-        try:
-            self._mission_fh.close()
-        except Exception:
-            pass
-        self._mission_fh = None
-        self._mission_path = None
+        with self._mission_lock:
+            try:
+                if self._mission_fh is not None:
+                    self._mission_fh.close()
+            except Exception:
+                pass
+            self._mission_fh = None
+            self._mission_path = None
 
     def _mission_write(self, event: str, payload: dict) -> None:
-        if getattr(self, "_mission_fh", None) is None:
-            return
         import json
 
         try:
             rec = {"event": event, "t": round(self.clock(), 3),
                    "wall": time.strftime("%H:%M:%S"), **payload}
-            self._mission_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            self._mission_fh.flush()   # 逐行落盤：當機/斷電也不掉已寫的
+            line = json.dumps(rec, ensure_ascii=False) + "\n"
+            with self._mission_lock:
+                if self._mission_fh is None:
+                    return
+                self._mission_fh.write(line)
+                self._mission_fh.flush()   # 逐行落盤：當機/斷電也不掉已寫的
         except Exception:
             pass
 
-    def manual_lock(self, track_id: int) -> None:
+    def manual_lock(self, track_id: int) -> str | None:
+        """UI 點選鎖定。成功回 None，拒絕回原因字串（HTTP 409 顯示給操作員）。"""
+        track_id = int(track_id)
+        # 點選的 ID 必須在「最近一幀」的偵測裡：畫面重繪/延遲會讓操作員點到
+        # 已消失的框，默默收下會白等 3 秒 pending 過期，UI 看起來像沒反應。
+        if track_id not in self._last_track_ids and track_id != self.lock.locked_id:
+            return f"目標 #{track_id} 已不在畫面中，請重新點選"
+        # 換到不同目標時，估計器必須跟著重置——否則 KF 還抱著舊車的軌跡，
+        # 新車的每一筆量測都被 30m 跳變閘擋掉：UI 顯示已鎖新車，導引卻繼續
+        # 朝舊車外推位置發指令最長 8 秒，然後 LOST 默默撤銷操作員的選擇。
+        if self.lock.locked_id is not None and track_id != self.lock.locked_id:
+            self.estimator.reset()
+            self.last_cmd = None
         self.lock.request_manual_lock(track_id)
+        return None
 
     def unlock(self) -> None:
         self.lock.unlock()
@@ -386,8 +425,19 @@ class TrackerEngine:
                     # 窗口整個被吃掉，coast 過期自動解鎖，事後閘門顯示的還是
                     # 停格前的過期理由。影像斷線時：KF 外推正是該頂上的東西，
                     # 狀態機要照走（COAST→LOST 判定）、導引要照發（用預測位置）。
-                    self.estimator.predict_to(clock_now)
-                    self._update_state_machine(clock_now, False)
+                    #
+                    # ⚠ 時間軸：幀路徑跑在「擷取時間軸」（capture_t = 到達 − 延遲），
+                    # idle 若用牆鐘會把 KF 推到量測的未來——影像恢復後的頭
+                    # ~latency 秒，每筆量測 predict_to 的 dt≤0 靜默 no-op、
+                    # 以錯誤時刻融合，把延遲補償要消除的滯後又加回來。
+                    idle_t = clock_now - self.video_latency_s
+                    # home 高度與 NED 基準的刷新不能只在幀路徑做：影像斷線期間
+                    # PX4 可能重設 home（重新解鎖），指令高度會帶著舊基準偏置
+                    store_idle = self.link.store
+                    if store_idle.home is not None:
+                        self.home_alt_amsl = store_idle.home.alt_amsl
+                    self.estimator.predict_to(idle_t)
+                    self._update_state_machine(idle_t, False)
                     self._run_guidance(clock_now)
                     self._publish_status(
                         clock_now, [], self.link.store.position_at(clock_now))
@@ -417,6 +467,8 @@ class TrackerEngine:
             # 靜默回空清單會讓操作員以為「畫面裡沒車」，必須讓 UI 看得到。
             self.detector_error = f"{type(exc).__name__}: {exc}"
             detections = []
+        # 給 manual_lock 驗證「點選的 ID 目前真的在畫面上」用
+        self._last_track_ids = {d.track_id for d in detections}
         locked_det = self.lock.update(detections)
 
         # 影像鏈路有固定延遲（RTSP/數位圖傳可達數百 ms）：這一幀「拍的是」
@@ -469,6 +521,10 @@ class TrackerEngine:
         self._render_overlay(frame, detections, locked_det, pos)
         self._publish_status(now, detections, pos)
         self._loop_times.append(now)
+        # 成功走完一輪就清 loop_error（對照 detector_error 的做法）：
+        # 否則一次瞬態例外＝永久紅色橫幅，之後真正的 video/mavlink 錯誤
+        # 全被它遮蔽（app.js 的錯誤鏈把 loop_error 排第一）——警報疲勞。
+        self.loop_error = None
         return True
 
     # ------------------------------------------------ 測地
@@ -534,6 +590,13 @@ class TrackerEngine:
                 best_id, best_d = det.track_id, d
         if best_id is not None:
             self.lock.locked_id = best_id
+            # 同步影像記憶：不同步的話 _last_box 還停在失鎖前的位置、
+            # _miss_age 累積讓影像重綁閘門張到 ~22 倍目標半徑——新 ID 下一幀
+            # 閃爍時，會用「陳舊位置＋全開閘門」綁上恰好路過的另一台車。
+            for det in detections:
+                if det.track_id == best_id:
+                    self.lock._remember(det)
+                    break
 
     # ------------------------------------------------ 狀態機
 
@@ -556,6 +619,18 @@ class TrackerEngine:
             self.estimator.reset()
 
     # ------------------------------------------------ 導引 + 雲台
+
+    def _current_home_ne(self) -> np.ndarray:
+        """目前 home 在（鎖定於第一筆 home 的）NED 座標系裡的位置。
+
+        NED 原點不隨 home 重設而動（動了 KF 會崩），但圍欄距離必須以
+        「目前的 home」為圓心量。home 沒重設過時這裡就是 (0,0)，行為不變。
+        """
+        home = self.link.store.home
+        if home is None or self.georef is None:
+            return np.zeros(2)
+        ne = self.georef.lla_to_ned(home.lat, home.lon, 0.0)
+        return np.array([ne[0], ne[1]])
 
     def _safety_cfg(self) -> dict:
         """安全門檻：`safety.<載體>` 子區段覆蓋 `safety` 的共用值。
@@ -627,6 +702,12 @@ class TrackerEngine:
         mode = hb.mode if hb else None
         armed = bool(hb.armed) if hb else False
         link_ok = store.link_alive(now, self.gates.link_timeout_s)
+        # lr24 後端是「遙測、指令兩條實體鏈路」：store.link_alive 只證明遙測
+        # （SiK）活著，指令通道（LR24 序列埠）拔線/寫入失敗時 connected=False
+        # ——不併進 link_ok 的話閘門全綠、指令卻全數落入黑洞。
+        cmd_ch = getattr(self.link, "command", None)
+        if cmd_ch is not None and not getattr(cmd_ch, "connected", True):
+            link_ok = False
 
         self.gates.observe_mode(mode, self.guidance_enabled)
 
@@ -642,10 +723,16 @@ class TrackerEngine:
             armed=armed,
             link_ok=link_ok,
             est_initialized=self.estimator.initialized,
+            # 年齡的評估時刻不能凍結在最後一幀：影像斷線時 _last_capture_t
+            # 不再前進，量測年齡會永遠顯示 0.1 秒、逾時閘永遠不跳。
+            # 取「最後擷取時刻」與「現在（換算到擷取時間軸）」較新者。
             est_age_s=self.estimator.time_since_update(
-                now if self._last_capture_t is None else self._last_capture_t),
+                max(self._last_capture_t or -math.inf, now - self.video_latency_s)),
             coast_timeout_s=self.coast_timeout_s,
-            cmd_point_ne=cmd.point_ne if cmd else None,
+            # 圍欄要量「離目前 home」的距離：NED 原點鎖在第一筆 home（刻意，
+            # 換原點會讓 KF 崩），但 PX4 重新解鎖會重設 home——換電池移動幾百
+            # 公尺後，圍欄若還錨在舊原點，離飛手 800m 的點會被當 500m 放行。
+            cmd_point_ne=(cmd.point_ne - self._current_home_ne()) if cmd else None,
             gps=getattr(store, "gps", None),
             landed=getattr(store, "landed", None),
         )
@@ -666,7 +753,11 @@ class TrackerEngine:
 
         if self.last_cmd is not None:
             moved = float(np.linalg.norm(cmd.point_ne - self.last_cmd.point_ne))
-            if moved < self.reposition_deadband_m:
+            # deadband 內仍要定期重發（keepalive）：engine 的「已發送」只代表
+            # 交給了後端——LR24 走非同步通道，逾時/被拒/過期丟棄後若目標靜止，
+            # deadband 會讓這筆指令永遠不再送出（飛機停在原地、閘門卻全綠）。
+            # 直連 MAVLink 重發同一點是冪等的，代價只是每 cmd_refresh_s 一幀。
+            if moved < self.reposition_deadband_m and (now - self.last_cmd.t) < self.cmd_refresh_s:
                 # 正常節流，但要讓操作員看得出「現在沒在發」的原因，
                 # 否則閘門全綠卻不動會被誤判成系統掛了。
                 self.guidance_note = (
@@ -704,6 +795,7 @@ class TrackerEngine:
             "ack": None,   # 由 _publish_status 用 COMMAND_ACK 回填
         }
         self.cmd_history.append(rec)
+        self.cmd_total += 1
         self._mission_write("command", {k: v for k, v in rec.items() if k != "ack"})
 
     def _run_gimbal(self, now: float, pos) -> None:
@@ -941,6 +1033,11 @@ class TrackerEngine:
             })
         status.vehicle["path"] = list(self.vehicle_path)[-200:]
         status.target["path"] = list(self.target_path)[-200:]
+        # 發布序號：/api/status 永遠回 200，引擎迴圈卡死時前端只會看到
+        # 「數字都不動」——多數欄位本來就常常不動，分不出來。序號凍結
+        # >2s 是唯一可靠的凍結訊號（前端據此掛紅色橫幅）。
+        self._status_seq = getattr(self, "_status_seq", 0) + 1
+        status.seq = self._status_seq
         with self._status_lock:
             self._status = status
 

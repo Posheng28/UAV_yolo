@@ -145,8 +145,13 @@ class SafetyGates:
         elif est_age_s > coast_timeout_s:
             blocked.append(f"目標估計逾時 {est_age_s:.1f}s（> coast {coast_timeout_s:.0f}s）")
         if cmd_point_ne is not None:
-            dist_home = float(np.linalg.norm(np.asarray(cmd_point_ne, dtype=float)))
-            if dist_home > self.max_cmd_distance_m:
+            pt = np.asarray(cmd_point_ne, dtype=float)
+            dist_home = float(np.linalg.norm(pt))
+            # NaN 對 `>` 恆為 False——不明確擋下的話，一個 NaN 指令點會
+            # 直接穿過圍欄（fail-open）。安全檢查必須 fail-closed。
+            if not np.all(np.isfinite(pt)):
+                blocked.append("指令點含非有限值（NaN/Inf），拒絕發送")
+            elif dist_home > self.max_cmd_distance_m:
                 blocked.append(f"指令點離 home {dist_home:.0f}m 超出圍欄 {self.max_cmd_distance_m:.0f}m")
         throttled = (
             self._last_send_t is not None

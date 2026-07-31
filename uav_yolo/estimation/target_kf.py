@@ -84,6 +84,13 @@ class TargetEstimator:
         """餵入一筆測地量測。回傳 (是否採納, 原因)。"""
         z = np.asarray(z_ne, dtype=np.float64).reshape(2)
 
+        # 🔴 NaN 對所有比較都是 False，統計閘與跳變閘全部失效開放：
+        # 一筆 NaN 會讓 x/P 全 NaN、last_update_t 卻持續刷新（UI 一直 TRACK），
+        # 之後圍欄 `NaN > 500` 也放行。init 分支同樣要擋，否則第一筆就毒化。
+        if not np.all(np.isfinite(z)) or not math.isfinite(t):
+            self.rejected_streak += 1
+            return False, "非有限量測拒收"
+
         if self.x is None:
             self.x = np.array([z[0], z[1], 0.0, 0.0])
             big_vel = 15.0**2  # 初始速度未知：給大變異數讓前幾筆量測快速定出速度

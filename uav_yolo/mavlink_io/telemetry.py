@@ -103,19 +103,34 @@ def _interp_angle(a1: float, a2: float, frac: float) -> float:
     return wrap_pi(a1 + wrap_pi(a2 - a1) * frac)
 
 
+# 🔴 新鮮度上限：查詢時刻超出最後一筆樣本這麼多秒，就回 None 而不是端點。
+# 沒有這個的話，數傳下行塞住（心跳照到、姿態/位置停更——LR24 實測就發生過）時，
+# 查詢永遠回放最後一筆：機體 12~15 m/s 續飛，每幀都拿「凍結的位姿」測地，
+# 逐幀漂移還騙得過 KF 閘門，最後在全綠閘門下把飛機送去幻影座標。
+# 回 None 則 engine 自然走「本幀無量測 → COAST → LOST」的優雅降級。
+MAX_SAMPLE_AGE_S = 1.0
+# 兩筆樣本間隔超過此值就不內插（角度跨大間隙取最短路徑可錯 180°），取較近端點。
+# 別設太小：GLOBAL_POSITION_INT 可能只有 1~2Hz，正常 span 就有 0.5~2s；
+# 這裡要防的是「數十秒斷流後假裝平滑飛過去」，不是正常取樣間隔。
+MAX_INTERP_GAP_S = 3.0
+
+
 def _interp_samples(buf: deque, t: float, fields: list[str], angle_fields: set[str], cls):
-    """時間戳內插；超出範圍取端點。buf 需依時間遞增。"""
+    """時間戳內插；過舊回 None、跨大間隙取較近端點。buf 需依時間遞增。"""
     if not buf:
         return None
     if t <= buf[0].t:
         return buf[0]
     if t >= buf[-1].t:
-        return buf[-1]
+        # 只允許小幅前向外推；超過新鮮度上限＝資料斷流，不可假裝還有位姿
+        return buf[-1] if (t - buf[-1].t) <= MAX_SAMPLE_AGE_S else None
     # 線性掃描（緩衝只有數十筆，夠快）
     for i in range(len(buf) - 1):
         s1, s2 = buf[i], buf[i + 1]
         if s1.t <= t <= s2.t:
             span = s2.t - s1.t
+            if span > MAX_INTERP_GAP_S:
+                return s1 if (t - s1.t) <= (s2.t - t) else s2
             frac = 0.0 if span <= 0 else (t - s1.t) / span
             values = {"t": t}
             for f in fields:
@@ -225,10 +240,14 @@ class TelemetryStore:
         with self._lock:
             if not self._gimbal:
                 return None
-            s = _interp_samples(
+            # yaw_is_earth 旗標在緩衝內翻轉時不可內插：一筆是機體相對、一筆是
+            # 大地參考，混著插出來的 yaw 兩種參考系都不是——ROI 接手的瞬間
+            # （正是 KF 閘最寬的時候）方位可錯數十度。取時間最近的原始樣本。
+            if any(s.yaw_is_earth != self._gimbal[0].yaw_is_earth for s in self._gimbal):
+                return min(self._gimbal, key=lambda s: abs(s.t - t))
+            return _interp_samples(
                 self._gimbal, t, ["roll", "pitch", "yaw"], {"roll", "pitch", "yaw"}, GimbalSample
             )
-            return s
 
     def link_alive(self, now: float, timeout_s: float) -> bool:
         with self._lock:
@@ -269,7 +288,7 @@ class MavlinkConnection:
         self.heartbeats_seen = 0
         self.gcs_heartbeats_sent = 0   # 我們發出去的；0 代表 PX4 不會對我們說話
         self._last_hb_sent_t = 0.0
-        self._text_chunks: dict[int, list[str]] = {}   # 多段 STATUSTEXT 重組用
+        self._text_chunks: dict[int, tuple] = {}   # 多段 STATUSTEXT 重組：id → (段列表, 首段時刻)
         # 🔴 收到的雲台姿態是「實測」還是「飛控用指令角合成的」？
         # PX4 在 MNT_MODE_OUT=0(AUX) 與 =1(v1) 兩種模式下，會拿**指令角**合成
         # GIMBAL_DEVICE_ATTITUDE_STATUS 發布出來——長得跟實測值一模一樣。
@@ -296,6 +315,9 @@ class MavlinkConnection:
                 self.port, baud=self.baud,
                 source_system=self.source_system, source_component=190,
             )
+            # 重連成功要清錯誤：否則一次 2 秒的 USB 重列舉，紅色「接收中斷」
+            # 會掛整趟飛行，跟旁邊的「數傳：正常」同屏矛盾，還遮蔽後續新錯誤
+            self.error = None
             return True
         except Exception as exc:  # 埠不存在/被占用（接 QGC、拔插電台時常見）
             self._conn = None
@@ -457,11 +479,22 @@ class MavlinkConnection:
                     text = text.decode("utf-8", "replace")
                 text = str(text).rstrip("\x00")
                 chunk_id = int(getattr(msg, "id", 0) or 0)
+                # 「未滿 50 = 最後一段」對總長剛好是 50 倍數的訊息永遠不成立，
+                # 那則訊息會卡在緩衝裡不顯示、還污染之後重用同 id 的訊息。
+                # 補兩個 flush 時機：新 id 抵達時沖掉其他 pending、逾時 2 秒也沖。
+                for old_id in list(self._text_chunks):
+                    parts, t0 = self._text_chunks[old_id]
+                    if old_id != chunk_id or (now - t0) > 2.0:
+                        joined = "".join(parts).strip()
+                        if joined:
+                            self.store.push_message(now, int(msg.severity), joined)
+                        del self._text_chunks[old_id]
                 if chunk_id:
-                    buf = self._text_chunks.setdefault(chunk_id, [])
-                    buf.append(text)
+                    parts, t0 = self._text_chunks.setdefault(chunk_id, ([], now))
+                    parts.append(text)
                     if len(text) < 50:            # 未滿 50 = 最後一段
-                        joined = "".join(self._text_chunks.pop(chunk_id)).strip()
+                        joined = "".join(parts).strip()
+                        del self._text_chunks[chunk_id]
                         if joined:
                             self.store.push_message(now, int(msg.severity), joined)
                 elif text.strip():

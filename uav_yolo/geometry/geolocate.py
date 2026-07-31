@@ -35,14 +35,22 @@ class GeoRef:
 
 
 def intersect_ground(p_ned: np.ndarray, dir_world: np.ndarray, ground_z: float = 0.0) -> np.ndarray | None:
-    """射線與水平地面求交。射線朝上或交點過遠（近水平掠射）回 None。"""
-    dz = float(dir_world[2])
+    """射線與水平地面求交。射線朝上、交點過遠、或輸入非有限值回 None。
+
+    NaN 防護不可省：NaN 對 `<=`/`>` 全是 False，會一路溜過這裡的守門、
+    KF 的閘門、以及安全圍欄（NaN > 500 為 False ＝ 放行）。
+    """
+    p = np.asarray(p_ned, dtype=np.float64)
+    d = np.asarray(dir_world, dtype=np.float64)
+    if not (np.all(np.isfinite(p)) and np.all(np.isfinite(d))):
+        return None
+    dz = float(d[2])
     if dz <= 1e-6:
         return None
-    s = (ground_z - float(p_ned[2])) / dz
-    if s <= 0.0 or s > MAX_SLANT_RANGE_M:
+    s = (ground_z - float(p[2])) / dz
+    if not math.isfinite(s) or s <= 0.0 or s > MAX_SLANT_RANGE_M:
         return None
-    return np.asarray(p_ned, dtype=np.float64) + s * np.asarray(dir_world, dtype=np.float64)
+    return p + s * d
 
 
 def geolocate_pixel(

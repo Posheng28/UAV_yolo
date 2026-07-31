@@ -306,7 +306,10 @@ class TargetLock:
                 if self._pending_age >= self.PENDING_EXPIRE_FRAMES:
                     self.pending_manual_id = None
                     self._pending_age = 0
-                elif self.mode == "manual":
+                elif self.mode == "manual" and self.locked_id is None:
+                    # 只有「沒有現任鎖定」才空等點選的 ID。已有鎖定時不能
+                    # return None：那會讓現任目標整整 3 秒收不到量測（KF 進
+                    # coast）——一次誤點就把好好追著的目標晾在一旁。
                     return None  # 等點選的 ID 出現
 
         if self.locked_id is not None:

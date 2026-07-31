@@ -12,6 +12,20 @@ const post = (path, body) =>
     body: JSON.stringify(body || {}),
   });
 
+// 後端拒絕（409/400 帶 {ok:false, error}）要讓操作員看到原因，
+// 不能讓「點了沒反應」自己猜。鎖定/解鎖等操作共用。
+async function postOrExplain(path, body) {
+  const res = await post(path, body);
+  if (res && res.ok === false && res.error) {
+    const b = $("#badge-state");
+    const keepText = b.textContent, keepCls = b.className;
+    b.textContent = `⚠ ${res.error}`;
+    b.className = "badge st-LOST";
+    setTimeout(() => { b.textContent = keepText; b.className = keepCls; }, 2500);
+  }
+  return res;
+}
+
 /* ---------------- 分頁切換 ---------------- */
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -48,12 +62,26 @@ function kvRow(k, v, cls = "") {
   return `<span class="k">${k}</span><span class="v ${cls}">${v}</span>`;
 }
 
+// 引擎凍結偵測：/api/status 永遠回 200，引擎迴圈卡死時大多數欄位「本來就
+// 常常不動」，操作員分不出來。唯一可靠的訊號是發布序號 seq 停止前進
+// （引擎正常時即使沒影像也 ≥2Hz 發布）。
+let lastSeq = null, lastSeqAt = 0;
 async function poll() {
   try {
     const st = await api("/api/status");
     checkUiVersion(st);
     lastStatus = st;
     renderStatus(st);
+    if (st.ready) {
+      const nowT = Date.now();
+      if (st.seq !== lastSeq) {
+        lastSeq = st.seq; lastSeqAt = nowT;
+      } else if (nowT - lastSeqAt > 2000) {
+        const b = $("#badge-state");
+        b.textContent = `⚠ 引擎迴圈凍結（狀態 ${Math.round((nowT - lastSeqAt) / 1000)}s 未更新）`;
+        b.className = "badge st-LOST";
+      }
+    }
   } catch (e) {
     $("#badge-state").textContent = "連線中斷";
     $("#badge-state").className = "badge st-LOST";
@@ -63,7 +91,9 @@ async function poll() {
 
 function renderStatus(st) {
   if (!st.ready) {
-    $("#badge-state").textContent = "引擎啟動中…";
+    // restart 失敗時後端會帶 error——只顯示「啟動中」會讓人傻等
+    $("#badge-state").textContent = st.error ? `⚠ ${st.error}` : "引擎啟動中…";
+    if (st.error) $("#badge-state").className = "badge st-LOST";
     return;
   }
   const modeBadge = $("#badge-mode");
@@ -167,7 +197,7 @@ function renderStatus(st) {
         .join("")
     : `<div class="mut small">畫面中沒有偵測到目標</div>`;
   document.querySelectorAll(".det-item").forEach((el) =>
-    el.addEventListener("click", () => post("/api/lock", { track_id: Number(el.dataset.id) }))
+    el.addEventListener("click", () => postOrExplain("/api/lock", { track_id: Number(el.dataset.id) }))
   );
 
   // 載具
@@ -286,19 +316,33 @@ function disarmGuidance() {
   const btn = $("#btn-guidance");
   btn.classList.remove("arming");
 }
+// 送出後立刻把 lastStatus 改成目標值（樂觀更新）：輪詢週期 500ms，
+// 剛啟用就想緊急關閉時，若還照「上一輪的舊狀態」分支，第一下會被
+// 誤判成「要啟用」而進入確認流程——緊急關閉被拖慢 4 秒是不可接受的。
+async function setGuidance(enabled) {
+  const btn = $("#btn-guidance");
+  btn.disabled = true;
+  try {
+    await post("/api/guidance", { enabled });
+    if (lastStatus) { lastStatus.guidance_enabled = enabled; renderStatus(lastStatus); }
+  } finally {
+    btn.disabled = false;
+  }
+}
 $("#btn-guidance").addEventListener("click", async () => {
   const btn = $("#btn-guidance");
+  if (btn.disabled) return;
   const enabled = lastStatus && lastStatus.guidance_enabled;
 
   if (enabled) {          // 關閉不需確認
     disarmGuidance();
-    await post("/api/guidance", { enabled: false });
+    await setGuidance(false);
     return;
   }
 
   if (armTimer) {         // 第二次點擊：確認啟用
     disarmGuidance();
-    await post("/api/guidance", { enabled: true });
+    await setGuidance(true);
     return;
   }
 
@@ -797,7 +841,7 @@ function enableClickToLock(imgId) {
         if (area < bestArea) { best = d; bestArea = area; }
       }
     }
-    if (best) post("/api/lock", { track_id: best.id });
+    if (best) postOrExplain("/api/lock", { track_id: best.id });
   });
   img.style.cursor = "crosshair";
 }

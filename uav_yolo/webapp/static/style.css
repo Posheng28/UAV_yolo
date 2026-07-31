@@ -151,6 +151,13 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .fc-msg.sev-warn { background: var(--amber-soft, #fdf0d5); color: var(--amber, #a15c00); }
 .fc-msg.sev-err { background: var(--red-soft); color: var(--red); font-weight: 700; }
 
+/* 接管恢復按鈕：琥珀色——不是紅色危險、也不是綠色正常，是「需要你決定」 */
+.big-btn.resume {
+  margin-top: 8px;
+  background: var(--amber-soft, #fdf0d5); color: var(--amber, #a15c00);
+  border: 2px solid var(--amber, #a15c00);
+}
+
 /* 已發送指令記錄 */
 .cmd-log { margin-top: 4px; display: flex; flex-direction: column; gap: 3px;
            max-height: 170px; overflow-y: auto; }

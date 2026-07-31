@@ -85,6 +85,18 @@ function renderStatus(st) {
     btn.className = "big-btn " + (st.guidance_enabled ? "on" : "off");
   }
 
+  // 接管恢復按鈕：只在「導引開著但被閂鎖」時出現
+  const rbtn = $("#btn-resume");
+  const showResume = st.guidance_enabled && st.latched;
+  if (!showResume && !rbtn.hidden) rbtn.hidden = true;
+  if (showResume && rbtn.hidden) {
+    rbtn.hidden = false;
+    rbtn.textContent = "⚠ 已接管——點擊恢復導引";
+  }
+  if (showResume && !rbtn.classList.contains("arming")) {
+    rbtn.textContent = "⚠ 已接管——點擊恢復導引";
+  }
+
   // 閘門
   const gates = $("#gate-list");
   // 高度被夾制永遠優先顯示：設定頁寫 4m、實際飛 20m，這種落差不能只在存檔時講一次
@@ -295,6 +307,25 @@ $("#btn-guidance").addEventListener("click", async () => {
   armTimer = setTimeout(disarmGuidance, 4000);
 });
 $("#btn-unlock").addEventListener("click", () => post("/api/unlock"));
+
+// 接管後的恢復：後端「重新啟用」= 解除閂鎖 + 清 deadband + 不換任務記錄檔。
+// 沒有這顆專用按鈕的話，恢復要「關導引 → 再開 → 確認」按三次——飛行中太笨拙，
+// 而且會把任務記錄切成兩份。一樣用兩段式確認，防誤觸。
+let resumeTimer = null;
+$("#btn-resume").addEventListener("click", async () => {
+  const btn = $("#btn-resume");
+  if (resumeTimer) {
+    clearTimeout(resumeTimer); resumeTimer = null;
+    btn.classList.remove("arming");
+    await post("/api/guidance", { enabled: true });   // 重新啟用＝解除閂鎖
+    return;
+  }
+  btn.classList.add("arming");
+  btn.textContent = "⚠ 再點一次確認恢復（4 秒內）";
+  resumeTimer = setTimeout(() => {
+    resumeTimer = null; btn.classList.remove("arming");
+  }, 4000);
+});
 
 /* ---------------- 鏈路自檢 ---------------- */
 const SC_ICON = { pass: "✅", warn: "⚠️", fail: "❌", skip: "➖" };

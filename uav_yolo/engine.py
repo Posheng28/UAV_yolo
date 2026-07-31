@@ -87,6 +87,7 @@ class EngineStatus:
     alt_clamp_note: str | None = None  # 設定的導引高度被安全上下限夾掉時的說明
     commands: list = field(default_factory=list)  # 最近發出的導引指令（新→舊，含 ACK）
     mission_log: str | None = None     # 任務記錄檔名（導引啟用中才有）
+    latched: bool = False              # 飛行員接管閂鎖：UI 要顯示專用的恢復按鈕
 
 
 class TrackerEngine:
@@ -953,6 +954,7 @@ class TrackerEngine:
         # 不能等下一幀影像進來才更新
         status.mission_log = (str(self._mission_path.name)
                               if getattr(self, "_mission_path", None) else None)
+        status.latched = self.gates.pilot_override_latched
         return status
 
 

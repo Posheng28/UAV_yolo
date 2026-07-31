@@ -277,6 +277,9 @@ class MavlinkConnection:
         # 就代表手上的姿態是指令值，對機械極限、模式切換、傾角保護全盲。
         # 這個分辨用在測地上是關鍵：指令值在雲台轉動中或撞到極限時與現實差很多。
         self.gimbal_information_seen = False
+        # 每種訊息的最新原始封包 (msg, 收到時刻)。診斷工具用 poll_raw 取用
+        # store 沒解析的訊息（如 POSITION_TARGET_GLOBAL_INT 讀回 setpoint）。
+        self.raw_last: dict[str, tuple] = {}
         self.hb_wrong_comp = 0  # 收到心跳但來自非自駕儀元件（雲台/相機）
 
     # ---- 生命週期 ----
@@ -352,6 +355,7 @@ class MavlinkConnection:
             self.msgs_parsed += 1
             now = time.monotonic()
             mtype = msg.get_type()
+            self.raw_last[mtype] = (msg, now)
 
             if mtype == "HEARTBEAT":
                 self.heartbeats_seen += 1
@@ -515,6 +519,20 @@ class MavlinkConnection:
         """
         for msg_id in self.UNUSED_MSG_IDS:
             self._command_long(511, msg_id, -1)
+
+    def poll_raw(self, msg_type: str, newer_than: float | None = None):
+        """取某訊息型別的最新原始封包；可要求「必須晚於某時刻」。
+
+        讀回驗證的關鍵在時序：送出指令**之前**收到的 setpoint 是舊狀態，
+        拿它對帳會拿到假陽性。newer_than 傳送出時刻即可濾掉。
+        """
+        item = self.raw_last.get(msg_type)
+        if item is None:
+            return None
+        msg, t = item
+        if newer_than is not None and t < newer_than:
+            return None
+        return msg
 
     def _request_intervals(self) -> None:
         """跟飛控要固定頻率的訊息（SET_MESSAGE_INTERVAL）。"""

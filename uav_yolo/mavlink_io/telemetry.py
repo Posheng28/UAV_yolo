@@ -280,6 +280,9 @@ class MavlinkConnection:
         # 每種訊息的最新原始封包 (msg, 收到時刻)。診斷工具用 poll_raw 取用
         # store 沒解析的訊息（如 POSITION_TARGET_GLOBAL_INT 讀回 setpoint）。
         self.raw_last: dict[str, tuple] = {}
+        # MAVLink shell（SERIAL_CONTROL）輸出累積區。raw_last 只留最新一包，
+        # 而 shell 輸出是連續多包，漏一包文字就斷——所以要另外累積。
+        self.shell_buf = bytearray()
         self.hb_wrong_comp = 0  # 收到心跳但來自非自駕儀元件（雲台/相機）
 
     # ---- 生命週期 ----
@@ -356,6 +359,9 @@ class MavlinkConnection:
             now = time.monotonic()
             mtype = msg.get_type()
             self.raw_last[mtype] = (msg, now)
+            if mtype == "SERIAL_CONTROL" and getattr(msg, "count", 0):
+                self.shell_buf += bytes(msg.data[:msg.count])
+                del self.shell_buf[:-65536]        # 防無限成長
 
             if mtype == "HEARTBEAT":
                 self.heartbeats_seen += 1
@@ -533,6 +539,33 @@ class MavlinkConnection:
         if newer_than is not None and t < newer_than:
             return None
         return msg
+
+    SERIAL_CONTROL_DEV_SHELL = 10
+    SERIAL_CONTROL_FLAGS = 6   # RESPOND | EXCLUSIVE（QGC MAVLink Console 同款）
+
+    def shell_exec(self, command: str, wait_s: float = 5.0) -> str:
+        """在飛控的 nsh shell 執行指令並回傳輸出（如 `listener vehicle_command`）。
+
+        這是台架驗證的關鍵能力：地面未解鎖時 PX4 的 setpoint 串流刻意發布
+        IDLE（防止馬達在地上想飛），讀不到導航目標——但 shell 可以直接讀
+        飛控肚子裡的 uORB topic，證明「收到的數值＝我們發的」。
+        """
+        if self._conn is None:
+            return ""
+        self.shell_buf.clear()
+        data = command.encode() + b"\n"
+        payload = bytes(list(data[:70]) + [0] * (70 - min(len(data), 70)))
+        with self._send_lock:
+            self._conn.mav.serial_control_send(
+                self.SERIAL_CONTROL_DEV_SHELL, self.SERIAL_CONTROL_FLAGS,
+                0, 0, min(len(data), 70), payload)
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            # nsh 提示符出現＝輸出結束，不用等好等滿
+            if b"nsh>" in self.shell_buf[-16:]:
+                break
+        return self.shell_buf.decode(errors="replace")
 
     def _request_intervals(self) -> None:
         """跟飛控要固定頻率的訊息（SET_MESSAGE_INTERVAL）。"""

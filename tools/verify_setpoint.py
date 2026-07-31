@@ -111,29 +111,50 @@ def main() -> int:
 
     hb = link.store.heartbeat
     print(f"  飛控模式  : {hb.mode if hb else '?'}")
+    # 注意：link 要留到 shell 讀回做完才能停——shell_exec 走同一條連線
+
+    if sp is not None:
+        # 空中路徑：飛行任務啟動後 setpoint 串流可用，直接對帳
+        sp_lat, sp_lon, sp_alt = sp.lat_int / 1e7, sp.lon_int / 1e7, float(sp.alt)
+        source = "POSITION_TARGET_GLOBAL_INT（navigator 目標點）"
+    else:
+        # 地面路徑：落地＋未解鎖時 PX4 刻意發布 IDLE setpoint（防馬達在地上
+        # 想飛），讀不到目標點——改用 shell 讀 vehicle_command，證明
+        # 「飛控收到並解碼的數值」＝「我們發的」。實測 int32 量化差 ~2cm。
+        print("  （地面狀態讀不到目標點串流——改由 shell 讀回 vehicle_command）")
+        import re
+
+        text = link.shell_exec("listener vehicle_command", wait_s=6.0)
+
+        def grab(name):
+            m2 = re.search(rf"\b{name}:\s*([-\d.]+)", text)
+            return float(m2.group(1)) if m2 else None
+
+        cmd_id = grab("command")
+        if cmd_id != 192:
+            print(f"❌ shell 讀回的最後一筆指令不是 DO_REPOSITION（command={cmd_id}）")
+            print(text[-600:])
+            link.stop()
+            return 1
+        sp_lat, sp_lon, sp_alt = grab("param5"), grab("param6"), grab("param7")
+        source = "vehicle_command（飛控解碼後的指令參數）"
     link.stop()
 
-    print("\n" + "=" * 64)
-    if sp is None:
-        print("❌ 10 秒內沒讀到 POSITION_TARGET_GLOBAL_INT。")
-        print("   可能：指令被拒（看上面 ACK）、或韌體不廣播此訊息。")
-        return 1
-
-    sp_lat, sp_lon = sp.lat_int / 1e7, sp.lon_int / 1e7
     dn = (sp_lat - lat) * 111320.0
     de = (sp_lon - lon) * 111320.0 * math.cos(math.radians(lat))
-    dalt = float(sp.alt) - alt_amsl
-    print("【逐欄位對帳：我發的 vs PX4 內部目標點】")
-    print(f"  lat   {lat:.7f}  vs  {sp_lat:.7f}   差 {dn:+.2f} m")
-    print(f"  lon   {lon:.7f}  vs  {sp_lon:.7f}   差 {de:+.2f} m")
-    print(f"  alt   {alt_amsl:.1f}  vs  {sp.alt:.1f} (AMSL)   差 {dalt:+.2f} m")
+    dalt = sp_alt - alt_amsl
+    print("\n" + "=" * 64)
+    print(f"【逐欄位對帳：我發的 vs {source}】")
+    print(f"  lat   {lat:.7f}  vs  {sp_lat:.7f}   差 {dn:+.3f} m")
+    print(f"  lon   {lon:.7f}  vs  {sp_lon:.7f}   差 {de:+.3f} m")
+    print(f"  alt   {alt_amsl:.2f}  vs  {sp_alt:.2f} (AMSL)   差 {dalt:+.3f} m")
     pos_ok = abs(dn) < 1.0 and abs(de) < 1.0
     alt_ok = abs(dalt) < 2.0
     print()
-    print(f"  {'✅' if pos_ok else '❌'} 水平位置：PX4 {'照收' if pos_ok else '解讀不一致！'}")
-    print(f"  {'✅' if alt_ok else '❌'} 高度：PX4 {'照收' if alt_ok else '解讀不一致（基準錯了？）！'}")
+    print(f"  {'✅' if pos_ok else '❌'} 水平位置：{'一致' if pos_ok else '不一致！'}")
+    print(f"  {'✅' if alt_ok else '❌'} 高度：{'一致' if alt_ok else '不一致（基準錯了？）！'}")
     if pos_ok and alt_ok:
-        print("\n  ✅ Pixhawk 讀懂了指令點，且內部目標＝我們要它去的地方。")
+        print("\n  ✅ Pixhawk 讀懂了指令點：收到的數值＝我們要它去的地方。")
     return 0 if (pos_ok and alt_ok) else 1
 
 

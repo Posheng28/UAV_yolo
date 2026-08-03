@@ -132,14 +132,25 @@ function renderStatus(st) {
   // 高度被夾制永遠優先顯示：設定頁寫 4m、實際飛 20m，這種落差不能只在存檔時講一次
   const altWarn = st.alt_clamp_note
     ? `<div class="gate-item warn">⚠ ${st.alt_clamp_note}</div>` : "";
+  // 🔴 「停止發送指令」不等於「飛機會停下來」。實測（模擬）：關掉導引後
+  // 新指令數為 0，飛機仍朝最後一個指令點飛了 13.5m——PX4 收下的
+  // DO_REPOSITION 不會因為我們不再發而取消，它會飛到該點並在那裡盤旋。
+  // 這件事只有飛手用遙控器切模式才能解除，介面必須講出來。
+  const lcAge = st.last_command ? st.last_command.age_s : null;
+  const stillFlying = !st.guidance_enabled && lcAge !== null && lcAge !== undefined && lcAge < 180;
+  const handoverWarn = stillFlying
+    ? `<div class="gate-item warn">⚠ 已停止發送新指令，但飛機仍會飛向最後一個指令點並在該處盤旋
+       （${fmt(lcAge, 0)} 秒前發出）。要立刻停住請由飛手用遙控器切 Position／Hold。</div>`
+    : "";
   if (st.guidance_enabled && st.gates.length === 0) {
     // 節流/deadband 是正常流量控制，用中性樣式；紅色 ✗ 只保留給真正的安全阻擋
     gates.innerHTML = altWarn + `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>` +
       (st.guidance_note ? `<div class="gate-item info">⏱ ${st.guidance_note}</div>` : "");
   } else if (st.gates.length) {
-    gates.innerHTML = altWarn + st.gates.map((g) => `<div class="gate-item">✗ ${g}</div>`).join("");
+    gates.innerHTML = altWarn + handoverWarn +
+      st.gates.map((g) => `<div class="gate-item">✗ ${g}</div>`).join("");
   } else {
-    gates.innerHTML = altWarn;
+    gates.innerHTML = altWarn + handoverWarn;
   }
 
   // 最後指令

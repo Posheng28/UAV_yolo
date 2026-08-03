@@ -231,9 +231,33 @@ function renderStatus(st) {
         ).join("") + `</div>`
       : "");
 
-  // 影像資訊
+  // 影像資訊。三種失效必須分開講，處置完全不同：
+  //   擷取中斷（connected=false）→ USB／採集卡／驅動
+  //   畫面停格（有幀但內容不變）→ 圖傳失鎖（RF）或相機端凍結
+  //   幀齡變大但仍連線     → 引擎迴圈或推論太慢
   $("#video-label").textContent = st.video.device || "影像";
-  $("#video-fps").textContent = st.video.connected ? `${fmt(st.video.fps, 0)} FPS` : "未連線";
+  const vh = st.video.health || {};
+  const age = st.video.frame_age_s;
+  let vtxt;
+  if (!st.video.connected) {
+    vtxt = vh.reopen_total ? `未連線（已重開 ${vh.reopen_total} 次）` : "未連線";
+  } else if (vh.frozen) {
+    vtxt = `⚠ 畫面停格${vh.blank ? "・全黑" : ""}`;
+  } else if (age !== null && age !== undefined && age > 2) {
+    vtxt = `⚠ ${fmt(age, 1)}s 未更新`;
+  } else {
+    vtxt = `${fmt(st.video.fps, 0)} FPS`;
+  }
+  $("#video-fps").textContent = vtxt;
+  // 🔴 畫面凍住時 /frame.jpg 仍會回上一張舊圖（HTTP 200），輪詢器的 onload
+  // 照常觸發，所以舊版覆蓋層在飛行中斷線時**永遠不會亮**——操作員對著一張
+  // 死畫面以為一切正常。改由引擎回報的真實狀態驅動（見 setVideoDead）。
+  setVideoDead(
+    !st.video.connected ? "擷取中斷．重新連接中…"
+      : vh.frozen ? (vh.blank ? "畫面停格・全黑（疑似圖傳失鎖）"
+                              : "畫面停格中（採集卡有訊號、畫面沒變）")
+      : null
+  );
   const ve = $("#video-error");
   // 偵測/迴圈例外排在最前面：它們的症狀是「畫面正常但完全偵測不到」，
   // 不講出來只會被誤判成「模型不準」而往錯的方向查。
@@ -768,6 +792,15 @@ $("#calib-save").addEventListener("click", async () => {
    MJPEG <img> 在伺服器/引擎重啟後會卡死不重連，操作員看到凍結畫面很危險。
    改成輪詢單幀 /frame.jpg：用 onload 串接下一張（不會塞車），
    失敗就顯示「連線中斷」並自動重試——任何重啟都能恢復。 */
+// 引擎回報的影像死亡原因（null＝正常）。renderStatus 寫、輪詢器讀——
+// 兩邊都在控制同一個覆蓋層，不共用狀態就會互相蓋來蓋去。
+let videoDeadReason = null;
+function setVideoDead(reason) {
+  videoDeadReason = reason;
+  if (typeof refreshFrameOverlay === "function") refreshFrameOverlay();
+}
+let refreshFrameOverlay = null;
+
 function startFramePoller(imgId, { fps = 12, lostId = null, staleMs = 2500 } = {}) {
   const img = document.getElementById(imgId);
   if (!img) return;
@@ -776,13 +809,20 @@ function startFramePoller(imgId, { fps = 12, lostId = null, staleMs = 2500 } = {
   let stopped = false;
   let lastGoodAt = performance.now();
 
-  // 覆蓋層只根據「距離上一張成功畫面多久」判斷，不看單次請求成敗。
-  // 理由：畫面正在更新卻顯示「中斷」是最糟的 UI 謊言——操作員會誤判鏈路壞掉。
-  // 唯一該顯示的情況是「畫面真的停了」，而那就是 staleMs 沒有更新。
+  // 覆蓋層的判斷來源有兩個，缺一不可：
+  //   ① 引擎說影像死了（擷取中斷或畫面停格）——**唯一**能偵測飛行中斷線的來源，
+  //      因為 /frame.jpg 會一直回上一張舊圖，HTTP 永遠成功。
+  //   ② HTTP 端真的拿不到圖超過 staleMs（伺服器/引擎重啟中）。
+  // 只看單次請求成敗是不行的：畫面正在更新卻顯示「中斷」是最糟的 UI 謊言。
   const refreshOverlay = () => {
     if (!lost) return;
-    lost.hidden = performance.now() - lastGoodAt < staleMs;
+    const httpStale = performance.now() - lastGoodAt >= staleMs;
+    lost.hidden = !(videoDeadReason || httpStale);
+    if (!lost.hidden) {
+      lost.textContent = videoDeadReason || "影像連線中斷．重新連接中…";
+    }
   };
+  if (lostId === "stream-lost") refreshFrameOverlay = refreshOverlay;
 
   const tick = () => {
     if (stopped) return;

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import deque
 
 import cv2
 
@@ -51,13 +52,26 @@ def list_video_devices() -> list[str]:
                 pass
 
 
-def _find_device_index(name_hint: str) -> int | None:
+def _index_of(names: list[str], name_hint: str) -> int | None:
+    """在已取得的裝置清單裡找名稱含 hint 的索引。
+
+    傳入清單而不是自己列舉：一次 _open() 原本會做兩次 COM 列舉（找索引一次、
+    取標籤一次），而重連路徑上每一毫秒都算在黑畫面時間裡。
+    """
     if not name_hint:
         return None
-    for idx, name in enumerate(list_video_devices()):
+    for idx, name in enumerate(names):
         if name_hint.lower() in name.lower():
             return idx
     return None
+
+
+def _find_device_index(name_hint: str) -> int | None:
+    return _index_of(list_video_devices(), name_hint)
+
+
+# DirectShow 開啟/格式協商全行程序列化（見 _open 內的說明）
+_device_open_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +205,12 @@ def probe_source(cfg_video: dict, sample_frames: int = 12) -> dict:
     不影響執行中的引擎（RTSP 可多開一路；UVC 若被佔用會回報 busy）。
     """
     src = VideoSource(dict(cfg_video))
-    cap = src._open()
+    try:
+        cap = src._open()
+    except Exception as exc:
+        # 開啟過程丟例外（驅動/格式協商）不該變成 HTTP 500，
+        # 操作員需要看到原因而不是一個紅色的伺服器錯誤
+        return {"ok": False, "mode": src.mode, "error": f"開啟時發生例外：{exc}"}
     if cap is None:
         return {
             "ok": False,
@@ -231,6 +250,32 @@ def probe_source(cfg_video: dict, sample_frames: int = 12) -> dict:
         cap.release()
 
 
+# 🔴 讀取失敗的容忍預算。UVC/HDMI 這條鏈路偶爾掉一兩顆幀是常態（USB 排程、
+# 採集卡重新同步、VRX 切模式），但舊版是「一次 read() 失敗就 sleep(0.5) 再把
+# 整個 DirectShow graph 拆掉重建」。實測（本機真實 UVC 裝置、1920×1080 MJPG）：
+# 注入**一次**失敗讀取 → 畫面凍結 3.7~8.8 秒、connected=False 3.2~7.2 秒，
+# 放大約 100~250 倍。重開的成本大宗是 _negotiate_format（0.83~5.9s）與驗證
+# 讀取（~1.0s），不是裝置列舉。所以：先原地重試，真的連續失敗才升級重連。
+READ_FAIL_TOLERANCE = 8      # 連續失敗數；30fps 下約 0.27 秒
+READ_RETRY_SLEEP_S = 0.005   # 重試間隔（不是 0.5 秒！）
+# 但重連失敗要退避：裝置真的不在（採集卡沒插、被別的程式佔住）時，若還用
+# 5ms 的節奏重試會把 CPU 和 log 洗爆——舊版每 0.54 秒重試一次就已經在
+# data/server.log.err 產生 12037 行。退避讓「暫時性」與「真的沒插」分道揚鑣。
+RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 3.0)
+
+# 內容活性檢查：採集卡有訊號但畫面不動（VRX 失鎖後吐靜止的「無訊號」畫面、
+# 或圖傳凍結）時，read() 一路成功、fps 正常、connected=True——舊版完全偵測
+# 不到，凍住的畫面還會被當成新量測餵進 KF。這是軟體端唯一能指認 RF 失鎖的訊號。
+FREEZE_ALERT_S = 1.5         # 畫面逐位元不變超過這麼久 → 判定停格
+# 全黑判定要有遲滯，否則亮度在門檻附近擺盪（黃昏、深色柏油、自動曝光呼吸）
+# 會讓 blank 每次取樣都翻面，事件洗版還會把真正重要的斷線事件擠出佇列。
+# 進入要「持續夠久」，離開只要亮度明顯回來——寧可晚報，不可亂報。
+BLANK_LUMA = 8.0             # 平均亮度低於此 → 疑似無訊號畫面
+BLANK_EXIT_LUMA = 15.0       # 高於此才算恢復
+BLANK_ENTER_S = 1.0          # 連續多久才判定
+LIVENESS_EVERY = 10          # 每 N 幀取樣一次（取樣成本 <0.1ms）
+
+
 class VideoSource:
     """統一的影像來源介面：start() 後用 get_frame() 拿 (frame, t_mono)。"""
 
@@ -249,6 +294,61 @@ class VideoSource:
         self.connected = False
         self.error: str | None = None
         self.device_label = ""
+
+        # ---- 可觀察狀態（UI 與任務記錄用；全部只由擷取執行緒更新） ----
+        # 沒有這些，事後只能面對「圖傳有時候會斷線」而完全無從分辨
+        # 「USB 掉線」「畫面凍住」「RF 失鎖」——三者的處置完全不同。
+        self.frames_total = 0
+        self.read_fail_streak = 0
+        self.read_fail_total = 0
+        self.reopen_total = 0
+        self.reopen_fail_total = 0
+        self.reopen_fail_streak = 0
+        self.last_open_ms: float | None = None
+        self.last_reason: str | None = None      # 上次重連的觸發原因
+        self.actual_wh: tuple[int, int] | None = None
+        self.actual_fourcc = ""
+        self.frozen = False                       # 有訊號但畫面不動
+        self.blank = False                        # 畫面幾乎全黑（疑似無訊號）
+        self.mean_luma: float | None = None
+        self._events: deque = deque(maxlen=200)   # 引擎每輪汲取寫進任務記錄
+        self._last_sig: int | None = None
+        self._last_change_t: float | None = None
+        self._liveness_n = 0
+        self._dark_since: float | None = None
+
+    # ---- 事件記錄 ----
+
+    def _note(self, kind: str, **detail) -> None:
+        """記一筆影像事件（含單調時間與牆鐘），供任務記錄與 UI 取用。"""
+        self._events.append({
+            "kind": kind,
+            "t": round(time.monotonic(), 3),
+            "wall": time.strftime("%H:%M:%S"),
+            **detail,
+        })
+
+    def drain_events(self) -> list[dict]:
+        """取走累積的事件（引擎呼叫；取走即清空）。"""
+        out = []
+        while self._events:
+            out.append(self._events.popleft())
+        return out
+
+    def snapshot(self) -> dict:
+        """給 /api/status 與任務快照的一份影像健康度。"""
+        return {
+            "frames_total": self.frames_total,
+            "reopen_total": self.reopen_total,
+            "reopen_fail_total": self.reopen_fail_total,
+            "read_fail_total": self.read_fail_total,
+            "last_reason": self.last_reason,
+            "last_open_ms": self.last_open_ms,
+            "frozen": self.frozen,
+            "blank": self.blank,
+            "mean_luma": None if self.mean_luma is None else round(self.mean_luma, 1),
+            "actual": (list(self.actual_wh) + [self.actual_fourcc]) if self.actual_wh else None,
+        }
 
     # ---- 開啟各種來源 ----
 
@@ -279,28 +379,40 @@ class VideoSource:
             return cap if cap.isOpened() else None
 
         # uvc / obs：DirectShow 名稱鎖定優先，其次索引
+        names = list_video_devices()
         if mode == "obs":
             hint = self.cfg.get("obs_name_hint", "OBS Virtual Camera")
-            index = _find_device_index(hint)
+            index = _index_of(names, hint)
             candidates = [index] if index is not None else [1, 2, 3]
         else:  # uvc
             hint = self.cfg.get("uvc_name_hint", "")
-            index = _find_device_index(hint)
+            index = _index_of(names, hint)
+            if index is None and hint:
+                # 名稱對不上就退索引是有風險的：實測本機索引 1 是 OBS 虛擬相機。
+                # 採集卡掉線時退回去等於默默改看別台裝置，畫面「有」但完全是錯的。
+                self.error = (f"找不到名稱含「{hint}」的擷取裝置"
+                              f"（目前有：{'、'.join(names) or '無'}），改用索引")
             candidates = [index] if index is not None else [int(self.cfg.get("uvc_index", 1))]
 
         for idx in candidates:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-            if not cap.isOpened():
-                cap.release()
-                continue
-            self._negotiate_format(cap)
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 只留最新一幀，別累積延遲
-            except Exception:
-                pass
-            ok, _ = cap.read()
+            # DirectShow 的開啟/格式協商不是執行緒安全的：舊擷取執行緒還在
+            # _negotiate_format 下 cap.set() 時，另一條（引擎重啟、或設定頁的
+            # 影像測試）同時開同一台，重現過 access violation／heap corruption
+            # 直接殺掉整個行程。全行程序列化開啟這段。
+            with _device_open_lock:
+                if self._stop.is_set():
+                    return None
+                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+                if not cap.isOpened():
+                    cap.release()
+                    continue
+                self._negotiate_format(cap)
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 只留最新一幀，別累積延遲
+                except Exception:
+                    pass
+                ok, _ = cap.read()
             if ok:
-                names = list_video_devices()
                 self.device_label = names[idx] if idx < len(names) else f"index {idx}"
                 return cap
             cap.release()
@@ -338,15 +450,27 @@ class VideoSource:
             if not fourcc_first and want:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*want))
 
+        def record() -> None:
+            # 解析度也要讀回：原本只驗 fourcc，裝置默默給了別的尺寸完全看不到。
+            try:
+                self.actual_wh = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                  int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            except Exception:
+                self.actual_wh = None
+            self.actual_fourcc = self.read_fourcc(cap).upper()
+
         apply(fourcc_first=True)
         if not want:
+            record()
             return
         if self.read_fourcc(cap).upper() == want:
+            record()
             return
 
         # 沒談成：換「先解析度後格式」再試（部分驅動只吃這個順序）
         apply(fourcc_first=False)
-        got = self.read_fourcc(cap).upper()
+        record()
+        got = self.actual_fourcc
         if got != want:
             self.error = (
                 f"要求 {want} 但裝置談成 {got or '未知'}；"
@@ -363,10 +487,15 @@ class VideoSource:
         不會自己恢復（例如重啟引擎時前一個 capture 尚未釋放裝置、或圖傳
         還沒供電）。這種暫時性失敗必須能自動康復。
         """
+        t0 = time.monotonic()
         self._cap = self._open()
+        self.last_open_ms = round((time.monotonic() - t0) * 1000)
         self.connected = self._cap is not None
+        self.last_reason = "startup"
         if self._cap is None:
             self.error = f"無法開啟影像來源（{self.mode}），持續重試中"
+        self._note("video_start", ok=self.connected, open_ms=self.last_open_ms,
+                   device=self.device_label[:60], mode=self.mode)
         self._stop.clear()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="video-capture")
         self._thread.start()
@@ -375,7 +504,10 @@ class VideoSource:
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=2.0)
+            # join 要撐得過進行中的 _open()：實測本機真實 UVC 裝置冷開機
+            # 可達 5.2 秒，2 秒的 join 會讓舊擷取執行緒與新引擎的執行緒同時
+            # 對 DirectShow 下 cap.set()，重現過 access violation 直接殺行程。
+            self._thread.join(timeout=10.0)
         # cap 的釋放歸擷取執行緒所有（_capture_loop 的 finally）。join 逾時代表
         # 執行緒還卡在 cap.read()（RTSP 斷線時可長達數秒）——這時從別的執行緒
         # release() 同一個 cap 是對使用中物件動手，OpenCV 會直接當掉整個行程。
@@ -389,10 +521,15 @@ class VideoSource:
             self._cap = None
         self.connected = False
 
-    def _reconnect(self) -> None:
+    def _reconnect(self, reason: str = "unknown") -> None:
         """先放掉舊的、再開新的：DirectShow 相機是獨占的，
         舊 handle 還握著時第二次開同一台一定失敗 → 重連會永遠打不通。"""
+        was_connected = self.connected
         self.connected = False
+        self.last_reason = reason
+        if was_connected:
+            self._note("video_lost", reason=reason, fps_before=round(self.fps, 1),
+                       fail_streak=self.read_fail_streak, frames_total=self.frames_total)
         if self._cap:
             try:
                 self._cap.release()
@@ -403,15 +540,90 @@ class VideoSource:
         # 下一個引擎（重啟流程）開同一台就 busy。
         if self._stop.is_set():
             return
+        t0 = time.monotonic()
         try:
             cap = self._open()
         except Exception as exc:
             self.error = f"重新開啟影像來源失敗：{exc}"
+            self.reopen_fail_total += 1
+            self._note("video_reopen", ok=False, err=str(exc)[:120],
+                       open_ms=round((time.monotonic() - t0) * 1000))
             return
+        self.reopen_total += 1
+        self.last_open_ms = round((time.monotonic() - t0) * 1000)
         if cap is not None:
             self._cap = cap
             self.connected = True
-            self.error = None
+            # _open 自己設的警告（例如「談成 YUY2、只有約 5 FPS」）不能被清掉，
+            # 那正是操作員最需要看到的東西。只清「重連中」這類過期訊息。
+            if self.error and (self.error.startswith("影像讀取失敗")
+                               or self.error.startswith("影像停滯")
+                               or self.error.startswith("無法開啟")
+                               or self.error.startswith("重新開啟")):
+                self.error = None
+            self.read_fail_streak = 0
+            self._last_sig = None
+            self._note("video_restored", reason=reason, open_ms=self.last_open_ms,
+                       device=self.device_label[:60], reopen_total=self.reopen_total)
+        else:
+            self.reopen_fail_total += 1
+            self._note("video_reopen", ok=False, open_ms=self.last_open_ms)
+
+    # ---- 內容活性（有訊號 ≠ 有畫面） ----
+
+    def _check_liveness(self, frame, now: float) -> None:
+        """read() 成功不代表畫面在動。
+
+        RF 失鎖時 VRX 多半仍持續輸出 HDMI（靜止的「無訊號」畫面），採集卡照樣
+        吐幀：connected=True、fps 正常、看門狗永遠不跳，而追蹤會抱著一張死畫面
+        繼續算並餵給 KF——沒有這個檢查，那是完全沉默的失效。
+        """
+        self._liveness_n += 1
+        if self._liveness_n % LIVENESS_EVERY:
+            return
+        try:
+            sample = frame[::32, ::32]
+            sig = int(sample.sum())
+            luma = float(sample.mean())
+        except Exception:
+            return
+        self.mean_luma = luma
+
+        # 全黑判定（帶遲滯，見常數處的說明）
+        if luma < BLANK_LUMA:
+            if self._dark_since is None:
+                self._dark_since = now
+            if not self.blank and (now - self._dark_since) >= BLANK_ENTER_S:
+                self.blank = True
+                self._note("video_blank", mean_luma=round(luma, 1))
+        elif luma > BLANK_EXIT_LUMA:
+            self._dark_since = None
+            if self.blank:
+                self.blank = False
+                self._note("video_signal", mean_luma=round(luma, 1))
+
+        if sig != self._last_sig:
+            was_still_since = self._last_change_t
+            self._last_sig = sig
+            self._last_change_t = now
+            if self.frozen:
+                self.frozen = False
+                # 停格持續多久要用「開始不動的時刻」算，不能用剛更新過的值（恆為 0）
+                self._note("video_unfroze",
+                           gap_s=round(now - (was_still_since or now), 1))
+                if self.error and self.error.startswith("影像停格"):
+                    self.error = None
+            return
+        # 畫面逐位元不變
+        if self._last_change_t is None:
+            self._last_change_t = now
+            return
+        held = now - self._last_change_t
+        if held >= FREEZE_ALERT_S and not self.frozen:
+            self.frozen = True
+            self.error = (f"影像停格 {held:.0f}s：採集卡有訊號但畫面沒變"
+                          f"（{'畫面幾乎全黑，疑似圖傳失鎖' if self.blank else '疑似圖傳/雲台端凍結'}）")
+            self._note("video_freeze", gap_s=round(held, 1), mean_luma=round(luma, 1))
 
     def _capture_loop(self) -> None:
         try:
@@ -440,44 +652,66 @@ class VideoSource:
                 # cv2 偶爾會直接丟例外（驅動/解碼問題）。不擋的話執行緒靜默死掉，
                 # UI 還顯示 connected=True、FPS 停在舊值——操作員完全看不出來。
                 self.error = f"影像擷取異常：{exc}（重試中）"
+                self._note("video_exception", err=str(exc)[:120])
                 time.sleep(1.0)
-                self._reconnect()
+                self._reconnect("exception")
                 last_good = time.monotonic()
                 continue
             now = time.monotonic()
 
-            # RTSP／網路來源可能「不報錯但也不再吐新幀」——read() 成功卻停更。
-            # 沒有 watchdog 的話追蹤會抱著一張舊畫面繼續算，非常危險。
             if ok and frame is not None:
                 last_good = now
-            elif now - last_good > stall_timeout and self.mode in ("rtsp", "uvc", "obs"):
-                self.error = f"影像停滯超過 {stall_timeout:.0f}s，重新連線中"
-                self._reconnect()
-                last_good = now
+                if self.read_fail_streak:
+                    # 撐過去了：這種「本來會變成數秒黑畫面」的瞬斷值得留痕，
+                    # 否則修好之後就再也不知道鏈路到底有多不乾淨。
+                    self._note("video_hiccup", fails=self.read_fail_streak)
+                    self.read_fail_streak = 0
+                    if self.error and self.error.startswith("影像讀取失敗"):
+                        self.error = None
+                self.frames_total += 1
+                self._check_liveness(frame, now)
+                file_rewinds = 0
+                with self._lock:
+                    self._frame = frame
+                    self._frame_t = now
+                fps_n += 1
+                if now - fps_t0 >= 2.0:
+                    self.fps = fps_n / (now - fps_t0)
+                    fps_t0, fps_n = now, 0
                 continue
 
-            if not ok or frame is None:
-                if self.mode == "file" and self._cap is not None:
-                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 影片檔循環播放
-                    # 損壞/空影片會讓「讀失敗→倒帶→讀失敗」變成無 sleep 的
-                    # 忙迴圈，吃滿一顆核心還不報錯。連續倒帶仍讀不到就要說。
-                    file_rewinds += 1
-                    if file_rewinds >= 3:
-                        self.error = f"影片檔讀不到任何幀：{self.device_label}"
-                        time.sleep(0.5)
-                    continue
-                time.sleep(0.5)
-                self._reconnect()  # 圖傳中斷自動重連
+            # ---- 讀取失敗 ----
+            if self.mode == "file" and self._cap is not None:
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 影片檔循環播放
+                # 損壞/空影片會讓「讀失敗→倒帶→讀失敗」變成無 sleep 的
+                # 忙迴圈，吃滿一顆核心還不報錯。連續倒帶仍讀不到就要說。
+                file_rewinds += 1
+                if file_rewinds >= 3:
+                    self.error = f"影片檔讀不到任何幀：{self.device_label}"
+                    time.sleep(0.5)
                 continue
 
-            file_rewinds = 0
-            with self._lock:
-                self._frame = frame
-                self._frame_t = now
-            fps_n += 1
-            if now - fps_t0 >= 2.0:
-                self.fps = fps_n / (now - fps_t0)
-                fps_t0, fps_n = now, 0
+            self.read_fail_streak += 1
+            self.read_fail_total += 1
+            # 🔴 先原地重試，別急著拆裝置：一次失敗就重開會把 33ms 的 USB
+            # 打嗝放大成數秒凍結（實測 3.7~8.8s）。連續失敗才是真的斷了。
+            if self.read_fail_streak < READ_FAIL_TOLERANCE:
+                if self.read_fail_streak == 1:
+                    self.error = "影像讀取失敗，重試中"
+                time.sleep(READ_RETRY_SLEEP_S)
+                continue
+
+            # 停滯逾時（read 成功但畫面不更新的情境由 _check_liveness 負責，
+            # 這裡處理的是「read 一直失敗」）
+            reason = ("stall_timeout" if now - last_good > stall_timeout else "read_false")
+            self._reconnect(reason)
+            if self.connected:
+                self.reopen_fail_streak = 0
+            else:
+                idx = min(self.reopen_fail_streak, len(RECONNECT_BACKOFF_S) - 1)
+                self.reopen_fail_streak += 1
+                time.sleep(RECONNECT_BACKOFF_S[idx])
+            last_good = time.monotonic()
 
     def get_frame(self):
         """回傳 (frame, t_mono)；還沒有畫面回 (None, None)。"""

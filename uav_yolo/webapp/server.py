@@ -275,13 +275,57 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def devices():
         return {"devices": list_video_devices()}
 
+    def _same_exclusive_device(a: dict, b: dict) -> bool:
+        """兩份影像設定是否指向同一台『獨占』裝置（DirectShow 的 uvc/obs）。
+
+        RTSP/檔案可以同時多開，UVC 不行。
+        """
+        mode = a.get("source")
+        if mode != b.get("source") or mode not in ("uvc", "obs"):
+            return False
+        if mode == "obs":
+            return a.get("obs_name_hint") == b.get("obs_name_hint")
+        return (a.get("uvc_name_hint") == b.get("uvc_name_hint")
+                and int(a.get("uvc_index", 1) or 1) == int(b.get("uvc_index", 1) or 1))
+
     @app.post("/api/video/test")
     def video_test(body: dict = Body(default={})):
-        """起飛前測試影像來源：回報實際解析度/fps，不動到執行中的引擎。"""
+        """起飛前測試影像來源：回報實際解析度/fps。
+
+        🔴 絕對不能對引擎正在用的 DirectShow 裝置開第二個 handle。實測 3/3 都
+        造成傷害：一次讓畫面凍 6.2 秒、兩次噴 cv2.error、一次直接 0xC0000005
+        打死整個行程。而這顆按鈕正是操作員發現圖傳怪怪的時候第一個會去按的。
+        同一台裝置就直接回報執行中擷取執行緒的實測狀態——那份資料還更真實。
+        """
         from ..vision.source import probe_source
 
         video_cfg = dict(cfg.section("video"))
         video_cfg.update(body or {})  # 允許帶入尚未儲存的設定先試
+
+        engine = manager.engine
+        live = getattr(engine, "video", None) if engine is not None else None
+        if live is not None and _same_exclusive_device(dict(getattr(live, "cfg", {}) or {}), video_cfg):
+            health = live.snapshot() if hasattr(live, "snapshot") else {}
+            wh = getattr(live, "actual_wh", None) or (live.width, live.height)
+            note = ("引擎正在使用這台裝置，直接回報執行中的實測狀態"
+                    "（不重複開啟，避免打斷影像）")
+            if not live.connected:
+                return {"ok": False, "mode": live.mode,
+                        "error": (live.error or "擷取未連線")
+                                 + f"；已重開 {health.get('reopen_total', 0)} 次",
+                        "device": live.device_label}
+            return {
+                "ok": True,
+                "mode": live.mode,
+                "device": live.device_label,
+                "width": wh[0], "height": wh[1],
+                "fps": round(float(getattr(live, "fps", 0.0)), 1),
+                "frames": health.get("frames_total"),
+                "fourcc": getattr(live, "actual_fourcc", ""),
+                "note": note if not live.error else f"{note}；{live.error}",
+                "gstreamer": False,
+                "health": health,
+            }
         return probe_source(video_cfg)
 
     # ---------------- 鏈路自檢 ----------------

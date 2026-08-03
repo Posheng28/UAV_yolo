@@ -174,6 +174,7 @@ class TrackerEngine:
         self.cmd_history: deque = deque(maxlen=15)   # 最近發出的導引指令（UI 顯示）
         self.cmd_total = 0                            # 本任務累計（deque 會截頂，不能拿 len 當計數）
         self._mission_lock = threading.Lock()         # 開/關/寫跨 HTTP 與迴圈執行緒
+        self._video_events: deque = deque(maxlen=50)  # 最近的影像事件（UI 顯示）
         self.last_known_lla: tuple[float, float] | None = None
         self.gate_report_blocked: list[str] = []
         self.guidance_note = ""
@@ -894,7 +895,39 @@ class TrackerEngine:
         with self._jpeg_lock:
             return None if self._raw_frame is None else self._raw_frame.copy()
 
+    def _drain_video_events(self) -> None:
+        """把擷取執行緒累積的影像事件收進 UI 快取、任務記錄與常駐黑盒子。
+
+        常駐檔（data/missions/video_events.jsonl）是刻意的：任務記錄只在導引
+        開啟時存在，但圖傳最常在起飛前與盤旋等待時斷——那些全都落在任務記錄
+        之外。事件本身很稀疏（一次任務通常個位數筆），檔案成長可忽略。
+        """
+        drain = getattr(self.video, "drain_events", None)
+        if drain is None:
+            return
+        try:
+            events = drain()
+        except Exception:
+            return
+        if not events:
+            return
+        import json
+
+        for ev in events:
+            self._video_events.append(ev)
+            self._mission_write(ev.get("kind", "video_event"),
+                                {k: v for k, v in ev.items() if k not in ("kind", "t", "wall")})
+        try:
+            path = self._mission_dir() / "video_events.jsonl"
+            with open(path, "a", encoding="utf-8") as fh:
+                for ev in events:
+                    fh.write(json.dumps({"date": time.strftime("%Y-%m-%d"), **ev},
+                                        ensure_ascii=False) + "\n")
+        except Exception:
+            pass   # 黑盒子寫不進去不能擋任務
+
     def _publish_status(self, now: float, detections, pos) -> None:
+        self._drain_video_events()
         store = self.link.store
         hb = store.heartbeat
         loop_hz = 0.0
@@ -928,6 +961,13 @@ class TrackerEngine:
                 "fps": round(getattr(self.video, "fps", 0.0), 1),
                 "device": getattr(self.video, "device_label", ""),
                 "error": getattr(self.video, "error", None),
+                # 幀齡是「畫面凍住」與「擷取斷線」的分界：connected 仍為 True
+                # 但幀齡一直長 = 停格（RF 失鎖的典型長相），UI 要分開講。
+                "frame_age_s": (None if self._last_frame_t is None
+                                else round(max(0.0, time.monotonic() - self._last_frame_t), 1)),
+                "health": (self.video.snapshot()
+                           if hasattr(self.video, "snapshot") else None),
+                "events": list(self._video_events)[-8:],
             },
             vehicle={
                 "has_fix": pos is not None,
@@ -1024,9 +1064,17 @@ class TrackerEngine:
                         if self.estimator.initialized else None),
                 "dets": len(status.detections),
                 # 影像狀態必須進快照：上次覆盤時分不出「相機沒看到車」和
-                # 「影像根本沒進來」，兩者的處置完全不同
+                # 「影像根本沒進來」，兩者的處置完全不同。
+                # 欄位序：連線、fps、幀齡s、累計幀數、重開次數、平均亮度。
+                # 判讀：connected=False 或重開次數在爬 → 擷取層斷（USB/裝置）；
+                #      connected=True 但累計幀數不動、幀齡上升 → 畫面凍住；
+                #      幀數正常爬但亮度 <8 → 圖傳失鎖（RF），採集端其實正常。
                 "video": [bool(status.video.get("connected")),
-                          round(float(status.video.get("fps") or 0.0), 1)],
+                          round(float(status.video.get("fps") or 0.0), 1),
+                          status.video.get("frame_age_s"),
+                          (status.video.get("health") or {}).get("frames_total"),
+                          (status.video.get("health") or {}).get("reopen_total"),
+                          (status.video.get("health") or {}).get("mean_luma")],
                 "gates": list(self.gate_report_blocked),
                 "note": self.guidance_note or None,
                 "latched": self.gates.pilot_override_latched,

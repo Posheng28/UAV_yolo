@@ -16,6 +16,39 @@ from uav_yolo.config import Config
 from uav_yolo.webapp import create_app
 
 
+def _keep_awake() -> bool:
+    """要求 Windows 在地面站執行期間不要進入睡眠／Modern Standby。
+
+    🔴 實測（2026-07-31 那次任務）：筆電在任務進行中進入 Modern Standby，
+    Kernel-Power 506/507 顯示 19:06:59 睡著、19:11:08 才醒——整整 4 分 9 秒
+    地面站完全凍結，USB 上的採集卡與數傳一起斷，任務記錄中間是一段空白。
+    當天總共睡了 36 次。飛行中的地面站絕不能被 OS 凍住。
+
+    ES_CONTINUOUS 讓這個要求持續有效（不必定期重下）；ES_DISPLAY_REQUIRED
+    連螢幕一起擋掉，因為操作員要看畫面。非 Windows 或呼叫失敗就靜默略過。
+    """
+    try:
+        import ctypes
+
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_DISPLAY_REQUIRED = 0x00000002
+        rv = ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+        return bool(rv)
+    except Exception:
+        return False
+
+
+def _allow_sleep() -> None:
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS
+    except Exception:
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="UAV_yolo 地面站")
     parser.add_argument("--host", default=None)
@@ -36,8 +69,14 @@ def main() -> None:
     port = args.port or int(cfg.get("system.web_port", 8600))
 
     app = create_app(cfg)
+    awake = _keep_awake()
     print(f">>> UAV_yolo 地面站 http://{host}:{port}  （模式：{cfg.get('system.mode')}）")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    print(">>> 睡眠抑制：" + ("已啟用（執行期間不會進入睡眠／關螢幕）"
+                             if awake else "無法啟用，請自行確認電源設定"))
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    finally:
+        _allow_sleep()   # 還原，否則這台筆電從此不睡
 
 
 if __name__ == "__main__":

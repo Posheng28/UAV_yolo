@@ -96,11 +96,18 @@ class SafetyGates:
         cmd_point_ne: np.ndarray | None,
         gps=None,
         landed=None,
+        video_frozen: bool = False,
     ) -> GateReport:
         blocked: list[str] = []
 
         if not guidance_enabled:
             blocked.append("導引開關未開啟（UI 儀表板打開）")
+        # 影像停格 ＝ 畫面死了但擷取還在吐幀（圖傳失鎖的典型長相）。此時
+        # 天底相機的固定像素會對應到「飛機下方固定偏移」的地面點，飛機一動
+        # 目標就跟著動——實測 12 秒漂 158m、KF 認定靜止的車以 15m/s 逃逸。
+        # 引擎已停止餵量測（第一道防線），這裡是第二道：明確告訴操作員為何不發。
+        if video_frozen:
+            blocked.append("影像停格中（畫面沒更新），不由死畫面推導指令")
         if self.pilot_override_latched:
             blocked.append("飛行員已接管（模式曾切出允許清單；重新啟用導引解除）")
         if not link_ok:

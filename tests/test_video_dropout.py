@@ -156,6 +156,75 @@ def test_live_picture_is_not_flagged(monkeypatch):
         src.stop()
 
 
+def test_frozen_picture_must_not_command_the_aircraft(tmp_path):
+    """🔴 本專案最重要的一條安全測試。
+
+    畫面停格但擷取仍在吐幀（＝圖傳失鎖、VRX 仍輸出 HDMI 的長相）時，天底鎖定
+    的相機讓固定像素永遠對應到「飛機下方固定偏移」的地面點：飛機一動，目標就
+    跟著動，形成追不到的胡蘿蔔。修正前實測（模擬）：12 秒內目標估計漂 158m、
+    KF 認定靜止的車以 15.2m/s 逃逸、**所有安全閘門全程通過**、又發出 12 筆
+    指令把飛機一路帶走。
+
+    修正後要求：停格期間一筆指令都不准發，並且畫面恢復後不必重啟就能續飛。
+    """
+    from uav_yolo.config import Config
+    from uav_yolo.simulation import build_sim_engine
+
+    dt = 0.05
+    cfg = Config(local_path=tmp_path / "local.yaml")
+    cfg.update({
+        "system": {"mode": "sim"},
+        "vehicle": {"airframe": "multirotor"},
+        "video": {"width": 960, "height": 540},
+        "detector": {"lock_mode": "auto", "min_lock_frames": 6},
+        "sim": {"patrol": False},
+        "camera": {"intrinsics_file": str(tmp_path / "no_intrinsics.yaml")},
+    })
+    engine = build_sim_engine(cfg, realtime=False)
+    world = engine.sim_world
+    engine.set_guidance_enabled(True)
+
+    def crank(seconds):
+        for _ in range(int(seconds / dt)):
+            world.step(dt)
+            engine.step()
+
+    crank(10.0)
+    assert engine.state == "TRACK" and engine.lock.locked, "基線沒鎖上，測試前提不成立"
+    base_cmds = engine.cmd_total
+    assert base_cmds > 0, "正常情況下本來就該發得出指令"
+
+    # ---- 凍結：內容固定、時間戳前進、車子還在畫面裡 ----
+    video = engine.video
+    frozen_frame = video.get_frame()[0]
+    frozen_dets = list(video.last_detections)
+    assert frozen_dets, "凍結當下畫面裡沒有目標，測試無效"
+    holder = {"t": engine.clock()}
+
+    def frozen_get_frame():
+        holder["t"] += dt
+        return frozen_frame.copy(), holder["t"]
+
+    original_get_frame = video.get_frame
+    video.get_frame = frozen_get_frame
+    video.last_detections = frozen_dets
+    video.frozen = True          # 真實 VideoSource 在畫面 1.5s 沒變化後會立起來
+
+    crank(12.0)
+    assert engine.cmd_total == base_cmds, (
+        f"停格期間竟然還發了 {engine.cmd_total - base_cmds} 筆指令——"
+        "這會把飛機帶著幻影目標一路飛走")
+    assert any("停格" in g for g in engine.gate_report_blocked), \
+        f"閘門沒有講出停格這個原因：{engine.gate_report_blocked}"
+
+    # ---- 恢復：不必重啟引擎就能續飛 ----
+    video.get_frame = original_get_frame
+    video.frozen = False
+    crank(10.0)
+    assert engine.state == "TRACK" and engine.lock.locked, "畫面恢復後沒有自己回到追蹤"
+    assert engine.cmd_total > base_cmds, "畫面恢復後指令沒有恢復發送"
+
+
 def test_video_test_endpoint_does_not_open_a_second_handle(monkeypatch, tmp_path):
     """/api/video/test 不得對引擎正在用的 DirectShow 裝置開第二個 handle。
 

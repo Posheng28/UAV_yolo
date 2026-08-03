@@ -483,17 +483,28 @@ class TrackerEngine:
 
         self.estimator.predict_to(capture_t)
 
+        # 🔴 畫面停格時絕對不能餵量測。實測（模擬，2026-08-03）：畫面凍住但
+        # 擷取仍在吐幀（＝VRX 失鎖仍輸出 HDMI 的長相）時，天底鎖定的相機讓
+        # 固定像素永遠對應到「飛機下方固定偏移」的地面點——飛機朝它飛，點就
+        # 跟著跑。12 秒內目標估計漂 158m、KF 認為靜止的車以 15.2m/s 在跑、
+        # 期間所有安全閘門全數通過、又發出 12 筆指令。追不到的胡蘿蔔會把
+        # 飛機一路帶到圍欄邊。停格 → 當作本幀沒有量測，自然走 COAST→LOST。
+        frozen = bool(getattr(self.video, "frozen", False))
         measured = False
-        if locked_det is not None and pos is not None and self.georef is not None:
+        if frozen:
+            self.last_meas_note = "影像停格，本幀量測作廢"
+        elif locked_det is not None and pos is not None and self.georef is not None:
             hit_ne = self._geolocate(locked_det, pos, att, capture_t)
             if hit_ne is not None:
                 ok, note = self.estimator.update(capture_t, hit_ne)
                 self.last_meas_note = note
                 measured = ok
 
-        # 未鎖定但 KF 還活著 → 世界座標重鎖定（丟失後目標重新出現）
+        # 未鎖定但 KF 還活著 → 世界座標重鎖定（丟失後目標重新出現）。
+        # 停格畫面同樣不能用來重鎖：那會把飛機自己的移動當成目標的移動。
         if (
-            locked_det is None
+            not frozen
+            and locked_det is None
             and self.estimator.initialized
             and pos is not None
             and self.georef is not None
@@ -736,6 +747,7 @@ class TrackerEngine:
             cmd_point_ne=(cmd.point_ne - self._current_home_ne()) if cmd else None,
             gps=getattr(store, "gps", None),
             landed=getattr(store, "landed", None),
+            video_frozen=bool(getattr(self.video, "frozen", False)),
         )
         # 高度基準不一致時，送出去的 AMSL 高度會錯得離譜（實測可差 135m）。
         # 這比任何安全門檻都優先——寧可完全不發，也不要發一個高度是錯的指令。

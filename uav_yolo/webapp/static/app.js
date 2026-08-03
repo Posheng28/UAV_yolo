@@ -136,13 +136,20 @@ function renderStatus(st) {
   // 新指令數為 0，飛機仍朝最後一個指令點飛了 13.5m——PX4 收下的
   // DO_REPOSITION 不會因為我們不再發而取消，它會飛到該點並在那裡盤旋。
   // 這件事只有飛手用遙控器切模式才能解除，介面必須講出來。
+  // 觸發條件看的是「指令還在外面、而我們已經不再更新它」，不是只看開關。
+  // 只綁開關的話，最需要這句話的情況反而不會出現：目標丟失(LOST)、閘門擋住、
+  // 飛手接管閂鎖——這些都是「導引還開著但已經不再發指令」，而飛機仍在飛向舊點。
   const lcAge = st.last_command ? st.last_command.age_s : null;
-  const stillFlying = !st.guidance_enabled && lcAge !== null && lcAge !== undefined && lcAge < 180;
+  const commandsFlowing = st.guidance_enabled && st.gates.length === 0 && st.state !== "LOST";
+  const stillFlying = !commandsFlowing && lcAge !== null && lcAge !== undefined && lcAge < 180;
   const handoverWarn = stillFlying
     ? `<div class="gate-item warn">⚠ 已停止發送新指令，但飛機仍會飛向最後一個指令點並在該處盤旋
        （${fmt(lcAge, 0)} 秒前發出）。要立刻停住請由飛手用遙控器切 Position／Hold。</div>`
     : "";
-  if (st.guidance_enabled && st.gates.length === 0) {
+  if (st.guidance_enabled && st.gates.length === 0 && st.state === "LOST") {
+    gates.innerHTML = altWarn + handoverWarn +
+      `<div class="gate-item">✗ 目標已丟失，停止發送新指令</div>`;
+  } else if (st.guidance_enabled && st.gates.length === 0) {
     // 節流/deadband 是正常流量控制，用中性樣式；紅色 ✗ 只保留給真正的安全阻擋
     gates.innerHTML = altWarn + `<div class="gate-item ok">✓ 全部閘門通過，指令發送中</div>` +
       (st.guidance_note ? `<div class="gate-item info">⏱ ${st.guidance_note}</div>` : "");

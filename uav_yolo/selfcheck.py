@@ -90,8 +90,24 @@ def check_calibration(engine, cfg) -> CheckResult:
         return _r("camera", "相機校正", "warn",
                   f"未校正，用 FOV {model.hfov_deg:.0f}° 近似（測地精度差、畫面邊緣尤其）",
                   "相機校正頁：整條鏈路（相機→圖傳→採集卡）拍棋盤格 15~25 張")
-    # 校正檔的解析度是否與目前實際幀相符
-    note = f"已校正（{model.width}×{model.height}，水平 FOV {model.hfov_deg:.0f}°）"
+    # 🔴 「有校正檔」不等於「校正是可用的」。畸變模型的徑向映射會在某個半徑
+    # 折返，超過之後去畸變不報錯、只回垃圾。本專案實測過一組 RMS 0.59px
+    # 看起來很漂亮的校正，畫面 20.2% 落在不可逆區，邊緣像素測地到數公里外。
+    # 棋盤沒拍到四角就會這樣，而且**只有這裡檢查得出來**。
+    max_r = model.max_invertible_r
+    corner_r = model.corner_radius()
+    if corner_r > max_r:
+        import math as _math
+
+        bad = max(0.0, 1.0 - (max_r / corner_r) ** 2)   # 以半徑平方粗估面積比
+        return _r("camera", "相機校正", "fail",
+                  f"畸變模型在畫面邊緣不可逆（可用半徑 {max_r:.3f} < 四角 {corner_r:.3f}，"
+                  f"約 {bad * 100:.0f}% 畫面），該區測地會算出離飛機數公里的假座標",
+                  "重拍校正並讓棋盤格確實覆蓋畫面四角（目前邊緣像素已被程式擋下，"
+                  "代價是目標一靠近邊緣就會暫時失去量測）",
+                  path=str(path))
+    note = (f"已校正（{model.width}×{model.height}，水平 FOV {model.hfov_deg:.0f}°，"
+            f"畸變模型可用半徑 {max_r:.2f} ≥ 四角 {corner_r:.2f}）")
     return _r("camera", "相機校正", "pass", note, path=str(path))
 
 

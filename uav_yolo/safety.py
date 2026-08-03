@@ -27,6 +27,10 @@ class GateReport:
 
 
 class SafetyGates:
+    # 這兩個資料流的要求速率分別約 2Hz 與 1Hz；容忍數倍抖動後仍算過期。
+    GPS_MAX_AGE_S = 3.0
+    LANDED_MAX_AGE_S = 5.0
+
     def __init__(self, cfg_safety: dict, rate_hz: float):
         self.pilot_override_latched = False
         self._last_mode: str | None = None
@@ -118,14 +122,23 @@ class SafetyGates:
             blocked.append(f"模式 {mode} 不在允許清單 {sorted(self.allowed_modes)}")
         if not armed:
             blocked.append("載具未 arm")
+        # 🔴 這兩個是「最後一次收到的快照」，不會過期自清——資料流單獨死掉時
+        # （LR24 半雙工實測只拿到約 37% 的要求速率，1Hz 訊息掉幾秒很正常），
+        # 閘門會拿一份幾分鐘前的樣本回答「一切正常」。位置/姿態有新鮮度保護，
+        # 這兩個沒有，所以要在這裡補。
         if self.require_airborne:
             if landed is None:
                 blocked.append("尚未收到離地狀態（EXTENDED_SYS_STATE）")
+            elif (now - getattr(landed, "t", now)) > self.LANDED_MAX_AGE_S:
+                blocked.append(
+                    f"離地狀態已過期 {now - landed.t:.0f}s（EXTENDED_SYS_STATE 停止更新）")
             elif not landed.airborne:
                 blocked.append("載具尚未離地（本系統不負責起飛）")
         if self.require_gps_quality:
             if gps is None:
                 blocked.append("尚未收到 GPS 品質（GPS_RAW_INT）")
+            elif (now - getattr(gps, "t", now)) > self.GPS_MAX_AGE_S:
+                blocked.append(f"GPS 品質資料已過期 {now - gps.t:.0f}s（GPS_RAW_INT 停止更新）")
             else:
                 import math as _math
 

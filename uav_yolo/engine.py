@@ -279,7 +279,7 @@ class TrackerEngine:
         elif hasattr(self.detector, "imgsz"):
             self.detector.imgsz = int(det_cfg.get("imgsz", 640))
         self.lock.mode = det_cfg.get("lock_mode", "auto")
-        self.lock.min_lock_frames = int(det_cfg.get("min_lock_frames", 6))
+        self.lock.min_lock_frames = max(1, int(det_cfg.get("min_lock_frames", 6)))
         applied.append("detector")
 
         # 估計器與影像延遲補償
@@ -442,6 +442,10 @@ class TrackerEngine:
                     self._run_guidance(clock_now)
                     self._publish_status(
                         clock_now, [], self.link.store.position_at(clock_now))
+                    # 這條分支也要自清 loop_error。之前只在有幀的路徑清，
+                    # 而採集卡拔掉時**只有**這條在跑——一次瞬態例外就會永久
+                    # 掛著紅字，把底下真正的影像/數傳錯誤全遮住。
+                    self.loop_error = None
                 except Exception as exc:
                     self.loop_error = f"{type(exc).__name__}: {exc}"
             return False
@@ -585,7 +589,18 @@ class TrackerEngine:
         u, v = det.ground_pixel
         hit = geolocate_pixel(u, v, self.camera_model, R_wc, vehicle_ned)
         if hit is None:
-            self.last_meas_note = "視線未交地（朝天/掠射）"
+            self.last_meas_note = "視線未交地（朝天/掠射，或像素落在畸變不可逆區）"
+            return None
+        # 🔴 斜距合理性：天底鎖定相機看得到的地面，最遠就是 alt·tan(HFOV/2)，
+        # 加上姿態傾斜也不會超過幾倍高度。超過就是測地壞了（畸變模型在邊緣
+        # 失效、姿態錯、或高度錯），實測壞標定會算出離飛機數公里的「目標」。
+        # geolocate.py 的 MAX_SLANT_RANGE_M 是 10km，2.8m 高度下等於沒有把關。
+        slant = float(np.linalg.norm(hit - vehicle_ned))
+        limit = self.SLANT_RANGE_ALT_RATIO * max(float(pos.rel_alt), 1.0)
+        if slant > limit:
+            self.last_meas_note = (
+                f"測地距離 {slant:.0f}m 超過高度的 {self.SLANT_RANGE_ALT_RATIO:.0f} 倍"
+                f"（{limit:.0f}m），判定為測地失效並丟棄")
             return None
         return hit[:2]
 
@@ -657,6 +672,9 @@ class TrackerEngine:
         return merged
 
     ALT_REFERENCE_TOLERANCE_M = 10.0
+    # 天底鎖定相機的地面涵蓋 ≈ alt·tan(HFOV/2)，90° HFOV 下斜距最多約 1.4×alt。
+    # 取 6 倍留足姿態傾斜與高度誤差的餘裕，同時仍能擋掉「數公里外的目標」。
+    SLANT_RANGE_ALT_RATIO = 6.0
 
     def _altitude_reference_sane(self, pos) -> str | None:
         """home 高度與飛控自己的高度估計是不是同一個基準？不是就回原因字串。
@@ -674,8 +692,14 @@ class TrackerEngine:
         這時**任何**高度指令都不可信，寧可不發。
         """
         home = self.link.store.home
-        if home is None or pos is None:
+        if home is None:
             return None
+        if pos is None:
+            # 🔴 fail-closed。這是 DO_REPOSITION param7（PX4 一律當 AMSL）唯一
+            # 的把關，而位置停更的那段時間**指令照樣在發**（KF coast 最長 8 秒）。
+            # 查不了就不能放行：實機踩過 EKF2_HGT_REF 指向未安裝的測距儀，
+            # 基準差 135m，「跟隨 4m」會變成叫飛機爬 139m。
+            return "位置資料過期，無法驗證高度基準（AMSL），暫不發送指令"
         implied = float(pos.alt_amsl) - float(home.alt_amsl)
         gap = abs(implied - float(pos.rel_alt))
         if gap <= self.ALT_REFERENCE_TOLERANCE_M:
@@ -711,8 +735,13 @@ class TrackerEngine:
     def _run_guidance(self, now: float) -> None:
         store = self.link.store
         hb = store.heartbeat
-        mode = hb.mode if hb else None
-        armed = bool(hb.armed) if hb else False
+        # 🔴 心跳快照永遠不會被清空，只會停止更新。模式若照舊採用一份凍結的
+        # 心跳，飛行員接管的偵測（observe_mode 比對模式變化）就完全失明：
+        # 心跳停在 AUTO.LOITER，飛手早已切走，閂鎖不觸發、指令繼續發。
+        # 過期就當作「沒有心跳」，讓既有的「尚未收到心跳」路徑接手。
+        hb_fresh = bool(hb) and (now - hb.t) <= self.gates.link_timeout_s
+        mode = hb.mode if hb_fresh else None
+        armed = bool(hb.armed) if hb_fresh else False
         link_ok = store.link_alive(now, self.gates.link_timeout_s)
         # lr24 後端是「遙測、指令兩條實體鏈路」：store.link_alive 只證明遙測
         # （SiK）活著，指令通道（LR24 序列埠）拔線/寫入失敗時 connected=False
@@ -751,8 +780,11 @@ class TrackerEngine:
         )
         # 高度基準不一致時，送出去的 AMSL 高度會錯得離譜（實測可差 135m）。
         # 這比任何安全門檻都優先——寧可完全不發，也不要發一個高度是錯的指令。
+        # 查核要用「拿得到的最新位置」：影像斷線時 _last_capture_t 會凍在最後
+        # 一幀，拿舊時刻去查等於永遠在驗一筆陳年樣本。
         alt_ref_problem = self._altitude_reference_sane(
-            self.link.store.position_at(self._last_capture_t or now))
+            store.position_at(max(self._last_capture_t or -math.inf,
+                                  now - self.video_latency_s)))
         if alt_ref_problem:
             report.blocked.append(alt_ref_problem)
             report.ok = False
@@ -781,14 +813,25 @@ class TrackerEngine:
 
         lat, lon, _ = self.georef.ned_to_lla(np.array([cmd.point_ne[0], cmd.point_ne[1], 0.0]))
         alt_amsl = (self.home_alt_amsl or 0.0) + cmd.alt_rel_m
-        self.link.send_reposition(  # speed_ms 為 None 時各後端自行退回飛控預設
-            lat, lon, alt_amsl,
-            alt_rel_m=cmd.alt_rel_m,   # LR24 GOTO 用相對 home 高度；MAVLink 直連忽略
-            loiter_radius_m=cmd.loiter_radius_m,
-            loiter_ccw=cmd.loiter_ccw,
-            speed_ms=cmd.speed_ms,
-        )
+        # 🔴 限速閘門要在「送出之前」上膛。原本 mark_sent 排在 send 之後，
+        # send 拋例外（例如 COM 埠被拔）就永遠不上膛，同一筆指令會以迴圈頻率
+        # 重送——實測 8 秒內 149 次嘗試 vs 上限 8 次（18.6 倍），把半雙工鏈路
+        # 灌爆。送不出去是要重試沒錯，但必須照 guidance.rate_hz 的節奏重試。
         self.gates.mark_sent(now)
+        try:
+            self.link.send_reposition(  # speed_ms 為 None 時各後端自行退回飛控預設
+                lat, lon, alt_amsl,
+                alt_rel_m=cmd.alt_rel_m,   # LR24 GOTO 用相對 home 高度；MAVLink 直連忽略
+                loiter_radius_m=cmd.loiter_radius_m,
+                loiter_ccw=cmd.loiter_ccw,
+                speed_ms=cmd.speed_ms,
+            )
+        except Exception as exc:
+            # 送不出去必須看得見：靜默失敗會讓操作員盯著「指令發送中」的綠字，
+            # 而飛機其實什麼都沒收到。
+            self.loop_error = f"指令送出失敗：{type(exc).__name__}: {exc}"
+            self.guidance_note = "指令送出失敗（見錯誤列），下一個發送時槽重試"
+            return
         self.last_cmd = LastCommand(
             t=now, lat=lat, lon=lon, alt_rel=cmd.alt_rel_m,
             point_ne=cmd.point_ne.copy(), label=cmd.label, radius=cmd.loiter_radius_m,
@@ -975,8 +1018,10 @@ class TrackerEngine:
                 "error": getattr(self.video, "error", None),
                 # 幀齡是「畫面凍住」與「擷取斷線」的分界：connected 仍為 True
                 # 但幀齡一直長 = 停格（RF 失鎖的典型長相），UI 要分開講。
+                # 用引擎自己的時鐘，不是牆鐘：模擬模式跑虛擬時鐘（從 0 起算），
+                # 混用會算出十萬秒的幀齡，讓每次模擬演練都掛著停格警告。
                 "frame_age_s": (None if self._last_frame_t is None
-                                else round(max(0.0, time.monotonic() - self._last_frame_t), 1)),
+                                else round(max(0.0, self.clock() - self._last_frame_t), 1)),
                 "health": (self.video.snapshot()
                            if hasattr(self.video, "snapshot") else None),
                 "events": list(self._video_events)[-8:],
@@ -1112,6 +1157,10 @@ class TrackerEngine:
         status.mission_log = (str(self._mission_path.name)
                               if getattr(self, "_mission_path", None) else None)
         status.latched = self.gates.pilot_override_latched
+        # loop_error 也要即時：例外若發生在 _publish_status **之前**，快照就永遠
+        # 停在出事前那一份（顯示「✓ 全部閘門通過，指令發送中」），錯誤本身反而
+        # 傳不出去——最需要它的時候看不到，正是最糟的組合。
+        status.loop_error = self.loop_error
         return status
 
 

@@ -107,10 +107,22 @@ def test_small_disagreement_is_tolerated(tmp_path):
     assert engine._altitude_reference_sane(pos(117.0, 6.0)) is None
 
 
-def test_no_home_or_no_position_is_not_an_error(tmp_path):
+def test_no_home_yet_is_not_an_error(tmp_path):
     """還沒拿到 home 時不該報基準錯誤——那由別的閘門負責。"""
     engine = make_engine(tmp_path)
     engine.link.store.home = None
     assert engine._altitude_reference_sane(pos(117.0, 4.0)) is None
+
+
+def test_stale_position_blocks_instead_of_passing(tmp_path):
+    """🔴 位置查不到時必須 fail-closed（本測試取代舊的 fail-open 版本）。
+
+    這是 DO_REPOSITION param7（PX4 一律解讀成 AMSL）唯一的把關。而「位置停更
+    但心跳還在」時，link_alive 仍為真、KF 靠外推續命，實測**指令還會繼續發
+    8 秒**。舊行為是 pos=None 就回 None（放行），等於在最需要把關的那段時間
+    把唯一的把關關掉。查不了就不發。
+    """
+    engine = make_engine(tmp_path)
     engine.link.store.home = SimpleNamespace(lat=24.786, lon=120.997, alt_amsl=113.0)
-    assert engine._altitude_reference_sane(None) is None
+    problem = engine._altitude_reference_sane(None)
+    assert problem is not None and "高度基準" in problem

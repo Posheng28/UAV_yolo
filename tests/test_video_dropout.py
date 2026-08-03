@@ -131,6 +131,60 @@ def test_frozen_picture_is_detected_although_reads_succeed(monkeypatch):
         src.stop()
 
 
+def test_animated_corner_does_not_defeat_freeze_detection(monkeypatch):
+    """死畫面配一塊會動的角落（VRX 無訊號畫面上的計時器/圖示）仍要判定停格。
+
+    舊版把整張抽樣加總成一個整數（1080p 只取 0.098% 的點），任何一個落在
+    格線上的變動就讓死畫面看起來是活的——而這是 RF 失鎖的唯一軟體特徵。
+    """
+    base = np.full((480, 640, 3), 90, np.uint8)
+    counter = {"n": 0}
+
+    class OsdCap(ScriptedCap):
+        def read(self):
+            counter["n"] += 1
+            f = base.copy()
+            f[20:40, 300:420] = (counter["n"] * 7) % 255   # 會動的 OSD 條
+            return True, f
+
+    src, _ = _run_source(monkeypatch, [OsdCap()], wait_s=FREEZE_ALERT_S + 1.0)
+    try:
+        assert src.frozen is True, "會動的角落把整張死畫面偽裝成活的"
+    finally:
+        src.stop()
+
+
+def test_reconnect_does_not_clear_the_freeze_verdict(monkeypatch):
+    """抖動的採集卡不得靠「一直重連」把停格判定洗掉。
+
+    本機一天有 1540 次 USB 突發移除。舊版每次重連都清掉判定並重新計時
+    1.5 秒——實測每 1.2 秒重連一次時，判定為真的時間佔比是 0%，
+    等於這道防線在最需要它的機器上完全不存在。
+    """
+    still = np.full((480, 640, 3), 150, np.uint8)
+    n = {"reads": 0}
+
+    class FlappyCap(ScriptedCap):
+        def read(self):
+            n["reads"] += 1
+            # 每 40 幀連續失敗一輪，逼出一次完整重連
+            if n["reads"] % 40 >= 40 - READ_FAIL_TOLERANCE - 1:
+                return False, None
+            return True, still
+
+    src = VideoSource({"source": "uvc", "uvc_index": 1})
+    monkeypatch.setattr(src, "_open", lambda: FlappyCap())
+    src.start()
+    try:
+        time.sleep(FREEZE_ALERT_S + 1.5)
+        assert src.reopen_total > 0, "測試前提不成立：沒有發生重連"
+        assert src.frozen is True, (
+            f"重連把停格判定洗掉了（重開 {src.reopen_total} 次）——"
+            "抖動的裝置會讓這道防線形同虛設")
+    finally:
+        src.stop()
+
+
 def test_blank_picture_flags_suspected_link_loss(monkeypatch):
     """幾乎全黑＝典型的「無訊號」畫面，是 RF 失鎖的可觀察簽名。"""
     dark = np.zeros((32, 32, 3), np.uint8)

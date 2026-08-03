@@ -61,7 +61,9 @@ def geolocate_pixel(
     vehicle_ned: np.ndarray,
     ground_z: float = 0.0,
 ) -> np.ndarray | None:
-    """像素 → 地面 NED 座標；不可解（朝天/掠射）回 None。"""
+    """像素 → 地面 NED 座標；不可解（朝天/掠射/畸變不可逆）回 None。"""
     ray_cam = camera_model.pixel_to_ray(u, v)
+    if ray_cam is None:      # 像素落在畸變模型的不可逆區，去畸變結果不可信
+        return None
     dir_world = R_world_cam @ ray_cam
     return intersect_ground(vehicle_ned, dir_world, ground_z)

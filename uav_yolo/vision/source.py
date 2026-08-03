@@ -15,6 +15,7 @@ import time
 from collections import deque
 
 import cv2
+import numpy as np
 
 
 def list_video_devices() -> list[str]:
@@ -266,7 +267,15 @@ RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 3.0)
 # 內容活性檢查：採集卡有訊號但畫面不動（VRX 失鎖後吐靜止的「無訊號」畫面、
 # 或圖傳凍結）時，read() 一路成功、fps 正常、connected=True——舊版完全偵測
 # 不到，凍住的畫面還會被當成新量測餵進 KF。這是軟體端唯一能指認 RF 失鎖的訊號。
-FREEZE_ALERT_S = 1.5         # 畫面逐位元不變超過這麼久 → 判定停格
+FREEZE_ALERT_S = 1.5         # 畫面實質不變超過這麼久 → 判定停格
+# 取樣點變動比例低於此就算「沒在動」。
+#
+# 兩種誤判的代價完全不對稱，所以門檻刻意偏高：
+#   漏報（死畫面被當成活的）→ 導引拿死畫面推導指令 → 飛機追幻影，危險。
+#   誤報（活畫面被當成死的）→ 停止發指令並顯示原因，畫面一動就自動解除，安全。
+# 飛行中的實拍畫面幾乎每個取樣點都在變（機體晃動＋雜訊），遠高於 5%；
+# 而 VRX 無訊號畫面上的 OSD 條（1080p 下 300×30 ≈ 0.4%）遠低於 5%。
+FREEZE_CHANGED_FRAC = 0.05
 # 全黑判定要有遲滯，否則亮度在門檻附近擺盪（黃昏、深色柏油、自動曝光呼吸）
 # 會讓 blank 每次取樣都翻面，事件洗版還會把真正重要的斷線事件擠出佇列。
 # 進入要「持續夠久」，離開只要亮度明顯回來——寧可晚報，不可亂報。
@@ -312,7 +321,7 @@ class VideoSource:
         self.blank = False                        # 畫面幾乎全黑（疑似無訊號）
         self.mean_luma: float | None = None
         self._events: deque = deque(maxlen=200)   # 引擎每輪汲取寫進任務記錄
-        self._last_sig: int | None = None
+        self._last_sample = None      # 上一次的取樣（逐元素比對用）
         self._last_change_t: float | None = None
         self._liveness_n = 0
         self._dark_since: float | None = None
@@ -559,10 +568,16 @@ class VideoSource:
             if self.error and (self.error.startswith("影像讀取失敗")
                                or self.error.startswith("影像停滯")
                                or self.error.startswith("無法開啟")
-                               or self.error.startswith("重新開啟")):
+                               or self.error.startswith("重新開啟")
+                               or self.error.startswith("找不到名稱")):
                 self.error = None
             self.read_fail_streak = 0
-            self._last_sig = None
+            # 🔴 重連**不清** frozen。清掉的話，會抖動的採集卡（本機一天 1540 次
+            # USB 突發移除）每次重連都把停格判定歸零、重新計時 1.5 秒——實測
+            # 每 1.2 秒重連一次時，frozen 為真的時間佔比是 0%，等於這道防線
+            # 完全不存在。取樣基準重置即可，「是否停格」要等真的看到畫面在動
+            # 才由 _check_liveness 解除。
+            self._last_sample = None
             self._note("video_restored", reason=reason, open_ms=self.last_open_ms,
                        device=self.device_label[:60], reopen_total=self.reopen_total)
         else:
@@ -582,12 +597,23 @@ class VideoSource:
         if self._liveness_n % LIVENESS_EVERY:
             return
         try:
-            sample = frame[::32, ::32]
-            sig = int(sample.sum())
+            # 🔴 抽樣要夠密、比較要逐元素。原本是 frame[::32,::32].sum() 壓成
+            # 一個整數（1080p 下只有 6120 個值＝畫面的 0.098%）：任何一個
+            # 會動的角落（VRX 的 OSD 計時器、閃爍圖示）只要落在格線上，
+            # 整張死畫面就會被判成「活的」——而這是 RF 失鎖的唯一軟體特徵。
+            # 改成看「有多少比例的取樣點真的變了」，單一角落動不了大局。
+            sample = np.asarray(frame[::16, ::16], dtype=np.int16)
             luma = float(sample.mean())
         except Exception:
             return
         self.mean_luma = luma
+        prev = self._last_sample
+        self._last_sample = sample
+        if prev is None or prev.shape != sample.shape:
+            # 重連後（或解析度改變後）的第一筆只建基準，不下判斷：這裡若當成
+            # 「畫面有變」就會把 frozen 清掉，抖動的裝置每次重連都能洗掉判定。
+            return
+        changed_frac = float(np.count_nonzero(sample != prev)) / sample.size
 
         # 全黑判定（帶遲滯，見常數處的說明）
         if luma < BLANK_LUMA:
@@ -602,9 +628,8 @@ class VideoSource:
                 self.blank = False
                 self._note("video_signal", mean_luma=round(luma, 1))
 
-        if sig != self._last_sig:
+        if changed_frac >= FREEZE_CHANGED_FRAC:
             was_still_since = self._last_change_t
-            self._last_sig = sig
             self._last_change_t = now
             if self.frozen:
                 self.frozen = False
@@ -614,16 +639,20 @@ class VideoSource:
                 if self.error and self.error.startswith("影像停格"):
                     self.error = None
             return
-        # 畫面逐位元不變
+        # 畫面實質上沒有變化
         if self._last_change_t is None:
             self._last_change_t = now
             return
         held = now - self._last_change_t
-        if held >= FREEZE_ALERT_S and not self.frozen:
-            self.frozen = True
+        if held >= FREEZE_ALERT_S:
+            if not self.frozen:
+                self.frozen = True
+                self._note("video_freeze", gap_s=round(held, 1), mean_luma=round(luma, 1))
+            # 錯誤字串每次都重寫：它是唯一告訴操作員「這是圖傳失鎖、不是 USB」
+            # 的診斷。原本只在進入停格的那一瞬間寫一次，之後任何一次讀取失敗
+            # 都會把它蓋掉且永不回來（實測 7 次失敗後訊息永久消失）。
             self.error = (f"影像停格 {held:.0f}s：採集卡有訊號但畫面沒變"
                           f"（{'畫面幾乎全黑，疑似圖傳失鎖' if self.blank else '疑似圖傳/雲台端凍結'}）")
-            self._note("video_freeze", gap_s=round(held, 1), mean_luma=round(luma, 1))
 
     def _capture_loop(self) -> None:
         try:

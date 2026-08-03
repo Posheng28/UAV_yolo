@@ -231,7 +231,10 @@ class TargetLock:
 
     def __init__(self, mode: str = "auto", min_lock_frames: int = 6):
         self.mode = mode  # auto | manual
-        self.min_lock_frames = int(min_lock_frames)
+        # 夾成 >=1：設定檔曾出現 -3（manual 模式下無害，一旦切成自動就是
+        # 「第一幀看到什麼就鎖什麼」，反閃爍確認完全失效）。設定值本來就
+        # 可能被手改或從舊檔繼承，門檻這種東西要在程式裡守住。
+        self.min_lock_frames = max(1, int(min_lock_frames))
         self.locked_id: int | None = None
         self.pending_manual_id: int | None = None
         self._pending_age = 0

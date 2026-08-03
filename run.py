@@ -9,11 +9,48 @@
 """
 
 import argparse
+import os
+import sys
+import time
+from pathlib import Path
 
-import uvicorn
 
-from uav_yolo.config import Config
-from uav_yolo.webapp import create_app
+def _tee_stderr_to_log() -> str | None:
+    """把 stderr 在**作業系統層**（fd 2）導進 data/server.log。
+
+    為什麼重要：伺服器視窗一關，OpenCV 的訊息就永遠消失了——上次要查「飛行中
+    圖傳為什麼斷」時，唯一的線索就是這些訊息，而它們全丟在一個被關掉的視窗裡。
+    只導 stderr，啟動網址等正常訊息仍留在視窗上，操作流程完全不變。
+
+    🔴 兩個都是實測出來的順序限制，改動前先看這裡：
+      · Python 的 logging / redirect_stderr **攔不到**：OpenCV 的警告是 C 層
+        直接寫 fd 2 的，只有 os.dup2 這種 OS 層重導有效。
+      · **必須在 import cv2 之前執行**。OpenCV 的 CRT 在 DLL 載入時就把 stderr
+        的 handle 快取起來了，之後才 dup2 完全無效（實測：同一段程式碼放在
+        import cv2 之後，log 只有 Python 那行、C 層警告全部漏掉）。
+        所以這個函式在模組頂端就呼叫，uav_yolo 的 import 刻意排在它後面。
+    """
+    try:
+        log_dir = Path(__file__).resolve().parent / "data"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "server.log"
+        fh = open(path, "a", buffering=1, encoding="utf-8", errors="replace")
+        fh.write(f"\n===== session start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        fh.flush()
+        os.dup2(fh.fileno(), 2)          # fd 2 之後由這個檔案接手（含 C 層寫入）
+        sys.stderr = fh                   # Python 端也指過去，兩邊一致
+        return str(path)
+    except Exception:
+        return None                       # 記不了 log 不能擋開機
+
+
+# 只有「真的當啟動器執行」時才重導；被 import（測試/工具）時不動別人的 stderr。
+_LOG_PATH = _tee_stderr_to_log() if __name__ == "__main__" else None
+
+import uvicorn  # noqa: E402  ← 以下 import 會拉進 cv2，必須排在重導之後
+
+from uav_yolo.config import Config  # noqa: E402
+from uav_yolo.webapp import create_app  # noqa: E402
 
 
 def _keep_awake() -> bool:
@@ -68,11 +105,14 @@ def main() -> None:
     host = args.host or cfg.get("system.web_host", "127.0.0.1")
     port = args.port or int(cfg.get("system.web_port", 8600))
 
+    log_path = _LOG_PATH
     app = create_app(cfg)
     awake = _keep_awake()
     print(f">>> UAV_yolo 地面站 http://{host}:{port}  （模式：{cfg.get('system.mode')}）")
     print(">>> 睡眠抑制：" + ("已啟用（執行期間不會進入睡眠／關螢幕）"
                              if awake else "無法啟用，請自行確認電源設定"))
+    if log_path:
+        print(f">>> 診斷記錄：{log_path}（影像/驅動訊息；查斷線看這個檔）")
     try:
         uvicorn.run(app, host=host, port=port, log_level="warning")
     finally:

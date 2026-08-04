@@ -335,6 +335,7 @@ class VideoSource:
         self._liveness_n = 0
         self._dark_since: float | None = None
         self._last_relatch_t = 0.0    # 上次因停格而重開的時刻（冷卻用）
+        self._last_fail_note_t = 0.0  # 上次記錄「重開失敗」的時刻（收斂用）
 
     # ---- 事件記錄 ----
 
@@ -592,7 +593,17 @@ class VideoSource:
                        device=self.device_label[:60], reopen_total=self.reopen_total)
         else:
             self.reopen_fail_total += 1
-            self._note("video_reopen", ok=False, open_ms=self.last_open_ms)
+            # 重開失敗要收斂記錄。裝置不在時每幾秒就失敗一次，實例
+            # （2026-08-04）一場 160 分鐘產生 2999 筆 video_reopen，把
+            # video_events.jsonl 灌到 1.8MB——全是同一件事的複製貼上，
+            # 反而把真正重要的 video_lost / video_freeze 淹掉。
+            # 前幾次照記（要看得到開始失敗），之後每 60 秒摘要一次。
+            n = self.reopen_fail_streak
+            if n < 3 or (now_t := time.monotonic()) - self._last_fail_note_t >= 60.0:
+                if n >= 3:
+                    self._last_fail_note_t = now_t
+                self._note("video_reopen", ok=False, open_ms=self.last_open_ms,
+                           consecutive_failures=n + 1)
 
     # ---- 內容活性（有訊號 ≠ 有畫面） ----
 

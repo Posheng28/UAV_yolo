@@ -1209,8 +1209,17 @@ class TrackerEngine:
                               if getattr(self, "_mission_path", None) else None)
 
         # 任務記錄：每 0.5 秒一筆完整狀態快照（含閘門），覆盤時才知道
-        # 「那 8 秒為什麼沒發指令」是誰擋的
-        if getattr(self, "_mission_fh", None) is not None and now - self._mission_snap_t >= 0.5:
+        # 「那 8 秒為什麼沒發指令」是誰擋的。
+        #
+        # 但閒置時要放慢：實例（2026-08-04）操作員飛完忘了關導引，記錄以 2Hz
+        # 續寫 160 分鐘 → 25190 筆、17MB，而真正在飛的只有前 63 秒。覆盤時
+        # 那些閒置 snap 還會把偵測率稀釋成 0%，看起來像整場都沒偵測到。
+        # 「有事發生」= 鎖定中 or 已解鎖 or 影像正常，此時維持 0.5s 全解析度。
+        interesting = (self.estimator.initialized
+                       or bool(getattr(store.heartbeat, "armed", False))
+                       or bool(getattr(self.video, "connected", False)))
+        snap_dt = 0.5 if interesting else 5.0
+        if getattr(self, "_mission_fh", None) is not None and now - self._mission_snap_t >= snap_dt:
             self._mission_snap_t = now
             self._mission_write("snap", {
                 "state": self.state,

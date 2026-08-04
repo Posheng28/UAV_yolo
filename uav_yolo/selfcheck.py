@@ -97,14 +97,17 @@ def check_calibration(engine, cfg) -> CheckResult:
     max_r = model.max_invertible_r
     corner_r = model.corner_radius()
     if corner_r > max_r:
-        import math as _math
-
-        bad = max(0.0, 1.0 - (max_r / corner_r) ** 2)   # 以半徑平方粗估面積比
-        return _r("camera", "相機校正", "fail",
-                  f"畸變模型在畫面邊緣不可逆（可用半徑 {max_r:.3f} < 四角 {corner_r:.3f}，"
-                  f"約 {bad * 100:.0f}% 畫面），該區測地會算出離飛機數公里的假座標",
-                  "重拍校正並讓棋盤格確實覆蓋畫面四角（目前邊緣像素已被程式擋下，"
-                  "代價是目標一靠近邊緣就會暫時失去量測）",
+        bad = model.unusable_pixel_fraction()      # 實測比例，不是圓盤近似
+        # 為什麼是 warn 不是 fail：不可逆區的像素現在會直接回 None（拿不到
+        # 視線 → 那一幀沒有量測 → 走 COAST），**不會**再產生假座標。所以這
+        # 是「可用視野變小」的效能問題，不是安全問題，不該擋住起飛。
+        # 廣角鏡頭配 OpenCV 標準畸變模型時這是常態，重拍也不會消失。
+        return _r("camera", "相機校正", "warn",
+                  f"畫面外圈 {bad * 100:.0f}% 落在畸變模型不可逆區（可用半徑 "
+                  f"{max_r:.3f} < 四角 {corner_r:.3f}）；該區像素已被擋下不會產生"
+                  f"假座標，代價是目標靠近畫面邊緣時會暫時失去量測",
+                  "可照飛。要拿回那圈視野需改用 fisheye/rational 模型重新校正"
+                  "（廣角鏡頭的標準 5 參數模型在數學上就到不了四角，重拍無效）",
                   path=str(path))
     note = (f"已校正（{model.width}×{model.height}，水平 FOV {model.hfov_deg:.0f}°，"
             f"畸變模型可用半徑 {max_r:.2f} ≥ 四角 {corner_r:.2f}）")

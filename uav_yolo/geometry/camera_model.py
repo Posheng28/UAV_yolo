@@ -124,6 +124,27 @@ class CameraModel:
         self._max_inv_r = value
         return value
 
+    def unusable_pixel_fraction(self, step: int = 8) -> float:
+        """畫面中落在畸變不可逆區、因而拿不到視線的像素比例（實測，非估算）。
+
+        別用「1-(r_max/r_corner)²」那種圓盤近似：畫面是 16:9 的矩形，四角
+        只佔一小塊，圓盤公式會把 19.7% 誇大成 47%，讀起來像半個畫面廢掉。
+        """
+        cached = getattr(self, "_unusable_frac", None)
+        if cached is not None:
+            return cached
+        limit = self.max_invertible_r
+        if not math.isfinite(limit):
+            self._unusable_frac = 0.0
+            return 0.0
+        us = np.arange(0, self.width, step)
+        vs = np.arange(0, self.height, step)
+        x = (us - self.K[0, 2]) / self.K[0, 0]
+        y = (vs - self.K[1, 2]) / self.K[1, 1]
+        r = np.hypot(x[None, :], y[:, None])
+        self._unusable_frac = float((r > limit).mean())
+        return self._unusable_frac
+
     def corner_radius(self) -> float:
         """畫面四角的歸一化半徑（拿來和 max_invertible_r 比對）。"""
         xs = [(0 - self.K[0, 2]) / self.K[0, 0], (self.width - 1 - self.K[0, 2]) / self.K[0, 0]]

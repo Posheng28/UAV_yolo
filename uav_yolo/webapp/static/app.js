@@ -130,8 +130,11 @@ function renderStatus(st) {
   // 閘門
   const gates = $("#gate-list");
   // 高度被夾制永遠優先顯示：設定頁寫 4m、實際飛 20m，這種落差不能只在存檔時講一次
-  const altWarn = st.alt_clamp_note
-    ? `<div class="gate-item warn">⚠ ${st.alt_clamp_note}</div>` : "";
+  const altWarn = (st.alt_clamp_note
+    ? `<div class="gate-item warn">⚠ ${st.alt_clamp_note}</div>` : "")
+    // 高度基準漂移：飛控回報的高度在跑，測地座標會跟著錯（實測 GPS 3 分鐘漂 33m）
+    + (st.vehicle && st.vehicle.alt_drift
+       ? `<div class="gate-item warn">${st.vehicle.alt_drift}</div>` : "");
   // 🔴 「停止發送指令」不等於「飛機會停下來」。實測（模擬）：關掉導引後
   // 新指令數為 0，飛機仍朝最後一個指令點飛了 13.5m——PX4 收下的
   // DO_REPOSITION 不會因為我們不再發而取消，它會飛到該點並在那裡盤旋。

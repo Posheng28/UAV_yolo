@@ -167,6 +167,7 @@ class TrackerEngine:
         self.last_gimbal_cmd: tuple[float, float] | None = None  # (pitch_rad, yaw_rad)
         self.last_meas_note = ""
         self.height_source = "home"   # 測地用的高度來源（home / rangefinder）
+        self.alt_drift_note: str | None = None   # 高度基準漂移警告
         # 從空集合起始（而非 None）：引擎還沒處理過任何幀時，任何手動鎖定
         # 都該被拒絕——否則驗證被 getattr 預設值跳過，亂點 ID 也回 ok。
         self._last_track_ids: set[int] = set()
@@ -176,6 +177,7 @@ class TrackerEngine:
         self.cmd_total = 0                            # 本任務累計（deque 會截頂，不能拿 len 當計數）
         self._mission_lock = threading.Lock()         # 開/關/寫跨 HTTP 與迴圈執行緒
         self._video_events: deque = deque(maxlen=50)  # 最近的影像事件（UI 顯示）
+        self._alt_hist: deque = deque(maxlen=400)     # (t, rel_alt)：偵測高度基準漂移
         # 任務錄影（導引開＝開錄、導引關＝收檔）
         self._mission_video = None
         self._mission_video_wh = (0, 0)
@@ -824,6 +826,39 @@ class TrackerEngine:
         # 下限 0.5m：再小也沒意義（發送本來就有 1Hz 限速），只會徒增指令量
         return max(0.5, min(base, self.DEADBAND_VIEW_FRACTION * half_v))
 
+    ALT_DRIFT_WINDOW_S = 60.0
+    ALT_DRIFT_WARN_M = 3.0
+
+    def _altitude_drift_note(self, pos, now: float) -> str | None:
+        """高度估計是不是正在單向漂走？
+
+        🔴 2026-08-04 三份 .ulg 實測：GPS 高度在 3 分鐘內漂了 32.76m，而同機
+        的氣壓高度只變 0.02m。飛控 `EKF2_HGT_REF=1`（以 GPS 為高度基準）就
+        忠實跟著下去，rel_alt 一路變負，測地整趟無解、零指令。
+        最陰險的是 GPS **同時回報 eph 0.2m / epv 0.5m**——它宣稱次公尺精度，
+        所以任何「看精度欄位」的檢查都會放行。唯一看得出來的是「高度在漂」。
+
+        這裡只警告不擋：真實的爬升/下降也會讓數字變，分不出來；但飛控自己
+        認為在定點盤旋時高度卻一直跑，操作員該知道座標已經不能信了。
+        """
+        rel = getattr(pos, "rel_alt", None)
+        if rel is None:
+            return None
+        self._alt_hist.append((now, float(rel)))
+        while self._alt_hist and now - self._alt_hist[0][0] > self.ALT_DRIFT_WINDOW_S:
+            self._alt_hist.popleft()
+        if len(self._alt_hist) < 10:
+            return None
+        span = self._alt_hist[-1][0] - self._alt_hist[0][0]
+        if span < self.ALT_DRIFT_WINDOW_S * 0.5:
+            return None
+        delta = self._alt_hist[-1][1] - self._alt_hist[0][1]
+        if abs(delta) < self.ALT_DRIFT_WARN_M:
+            return None
+        return (f"⚠ 高度估計 {span:.0f} 秒內變化 {delta:+.1f}m（{delta / span * 60:+.1f} m/分）。"
+                "若飛機其實在定高，代表飛控的高度基準在漂（實測過 GPS 高度 3 分鐘漂 33m），"
+                "測地座標會跟著錯——建議把 EKF2_HGT_REF 改用氣壓或測距儀")
+
     def _current_home_ne(self) -> np.ndarray:
         """目前 home 在（鎖定於第一筆 home 的）NED 座標系裡的位置。
 
@@ -963,6 +998,8 @@ class TrackerEngine:
         # 一幀，拿舊時刻去查等於永遠在驗一筆陳年樣本。
         pos_for_check = store.position_at(max(self._last_capture_t or -math.inf,
                                               now - self.video_latency_s))
+        # 高度漂移只警告不擋（見 _altitude_drift_note 的說明）
+        self.alt_drift_note = self._altitude_drift_note(pos_for_check, now)
         alt_ref_problem = self._altitude_reference_sane(pos_for_check)
         if alt_ref_problem:
             report.blocked.append(alt_ref_problem)
@@ -1221,6 +1258,7 @@ class TrackerEngine:
                 "height_agl": (None if pos is None else
                                round(self._height_agl(pos, None)[0], 2)),
                 "height_source": self.height_source,
+                "alt_drift": self.alt_drift_note,
                 "rangefinder_m": (round(d.current_m, 2)
                                   if (d := getattr(store, "distance", None)) is not None
                                   and d.usable() else None),

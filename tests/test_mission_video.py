@@ -189,3 +189,78 @@ def test_locked_but_no_fix_says_why_instead_of_claiming_not_locked(tmp_path):
     assert any("高度" in g for g in locked_msg), "閘門要把測地失敗的原因帶出來"
     assert any("尚未鎖定" in g for g in unlocked_msg), unlocked_msg
     assert not any("已鎖定" in g for g in unlocked_msg), "沒鎖定時不該說已鎖定"
+
+
+# ---------------- 測地的離地高度來源（光流/測距儀） ----------------
+
+def test_rangefinder_height_rescues_a_broken_home_reference(tmp_path):
+    """🔴 2026-08-04 實機：裝光流後 rel_alt 回報 -2.3m（飛機明明在飛），
+    測地整趟無解、零指令。測距儀量的是離地真實高度，不受 home 基準影響。
+    """
+    from types import SimpleNamespace
+
+    from uav_yolo.mavlink_io.telemetry import DistanceSample
+
+    engine = make_engine(tmp_path)
+    crank(engine, 6.0)
+    att = SimpleNamespace(roll=0.0, pitch=0.0, yaw=0.0)
+    pos = SimpleNamespace(lat=24.7852, lon=120.9965, rel_alt=-2.3,
+                          alt_amsl=97.0, vn=0.0, ve=0.0)
+
+    # 沒有測距儀：只能用壞掉的 rel_alt
+    engine.link.store.distance = None
+    alt, src = engine._height_agl(pos, att)
+    assert src == "home" and alt == pytest.approx(-2.3)
+
+    # 有測距儀：拿到真實離地高度，測地就活了
+    engine.link.store.distance = DistanceSample(
+        t=engine.clock(), current_m=2.8, min_m=0.1, max_m=12.0, orientation=25)
+    alt, src = engine._height_agl(pos, att)
+    assert src == "rangefinder" and alt == pytest.approx(2.8, abs=0.01)
+
+
+def test_rangefinder_is_rejected_when_out_of_range_stale_or_tilted(tmp_path):
+    """測距儀不是無條件可信：超量程、過期、機身傾斜都要退回 rel_alt。"""
+    from types import SimpleNamespace
+
+    from uav_yolo.mavlink_io.telemetry import DistanceSample
+
+    engine = make_engine(tmp_path)
+    crank(engine, 6.0)
+    level = SimpleNamespace(roll=0.0, pitch=0.0, yaw=0.0)
+    pos = SimpleNamespace(lat=24.7852, lon=120.9965, rel_alt=5.0,
+                          alt_amsl=100.0, vn=0.0, ve=0.0)
+    now = engine.clock()
+
+    # 超出量程（讀數頂到 max）
+    engine.link.store.distance = DistanceSample(now, 12.0, 0.1, 12.0, 25)
+    assert engine._height_agl(pos, level)[1] == "home"
+
+    # 資料過期
+    engine.link.store.distance = DistanceSample(now - 30.0, 2.8, 0.1, 12.0, 25)
+    assert engine._height_agl(pos, level)[1] == "home"
+
+    # 機身傾斜 30 度：量到的是斜距，不是垂直高度
+    import math as _m
+    tilted = SimpleNamespace(roll=_m.radians(30.0), pitch=0.0, yaw=0.0)
+    engine.link.store.distance = DistanceSample(now, 2.8, 0.1, 12.0, 25)
+    assert engine._height_agl(pos, tilted)[1] == "home"
+
+    # 不是朝下的感測器（例如前向避障）
+    engine.link.store.distance = DistanceSample(now, 2.8, 0.1, 12.0, orientation=0)
+    assert engine._height_agl(pos, level)[1] == "home"
+
+
+def test_height_source_can_be_forced_to_home(tmp_path):
+    """設定成 home 就一律用 rel_alt，不要自作聰明。"""
+    from types import SimpleNamespace
+
+    from uav_yolo.mavlink_io.telemetry import DistanceSample
+
+    engine = make_engine(tmp_path)
+    engine.cfg.override({"camera": {"height_source": "home"}})
+    crank(engine, 6.0)
+    engine.link.store.distance = DistanceSample(engine.clock(), 2.8, 0.1, 12.0, 25)
+    pos = SimpleNamespace(lat=24.0, lon=120.0, rel_alt=5.0, alt_amsl=100.0, vn=0.0, ve=0.0)
+    att = SimpleNamespace(roll=0.0, pitch=0.0, yaw=0.0)
+    assert engine._height_agl(pos, att) == (5.0, "home")

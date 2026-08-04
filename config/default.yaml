@@ -14,8 +14,11 @@ system:
   # 任務錄影：導引啟用時把「疊了偵測框的畫面」錄成與 JSONL 同名的 .mp4。
   # JSONL 記得到座標與閘門，記不到「那個框是車還是草」——覆盤時那才是關鍵。
   mission_video: true
+  # （camera.height_source 見 camera 區段）
   mission_video_scale: 0.5   # 相對來源解析度（1920x1080 → 960x540）
   mission_video_fps: 15.0    # 抽幀寫入，別把磁碟寫爆
+  # 只保留最近幾部影片（0=不刪）。實測一個下午 13 趟就 414MB，而 JSONL 才 1.5MB。
+  mission_video_keep: 12
 
 vehicle:
   airframe: multirotor  # multirotor=旋翼機 | fixedwing=固定翼
@@ -49,6 +52,15 @@ camera:
   # 校正結果檔（UI 校正頁產生）。檔案不存在時退回用 fallback_hfov_deg 近似
   intrinsics_file: config/camera_intrinsics.yaml
   fallback_hfov_deg: 120.0
+  # 測地要用的「離地高度」來源：
+  #   auto       = 有可用的測距儀就用它，否則退回 rel_alt（建議）
+  #   home       = 一律用 rel_alt（相對 home 高度）＝舊行為
+  #   rangefinder= 只用測距儀，拿不到就不發指令（最嚴格）
+  # 為什麼預設 auto：平地假設需要的是「離目標所在地面的高度」，而 rel_alt 是
+  # 「相對 home」。home 基準一偏，測地距離就整體差 h/(h+Δ) 倍（3m 高偏 3m ＝
+  # 50% 誤差）；實機更遇過 rel_alt 回報負值導致整趟零指令。測距儀直接量離地
+  # 高度，不受 home 影響。傾角 >20° 或超出量程時自動退回 rel_alt。
+  height_source: auto
 
 gimbal:
   present: true         # 有沒有裝雲台（C-20T 三軸）
@@ -199,6 +211,7 @@ mavlink:
     GIMBAL_DEVICE_ATTITUDE_STATUS: 5
     GPS_RAW_INT: 2              # GPS 品質閘門用
     EXTENDED_SYS_STATE: 1       # 離地判定用
+    DISTANCE_SENSOR: 5          # 測距儀（光流模組多半附帶）；測地的離地高度來源
 
 link:
   # 指令後端：決定「算出的目標 GPS」用什麼方式送出去

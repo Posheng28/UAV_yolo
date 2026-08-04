@@ -230,7 +230,15 @@ function renderStatus(st) {
     kvRow("模式", v.mode || "—", v.mode === "AUTO.LOITER" ? "good" : "") +
     kvRow("Arm", v.armed ? "已解鎖" : "未解鎖", v.armed ? "good" : "") +
     kvRow("數傳", v.link_ok ? "正常" : "斷線", v.link_ok ? "good" : "bad") +
-    kvRow("高度(相對)", v.rel_alt !== null && v.rel_alt !== undefined ? fmt(v.rel_alt, 0) + " m" : "—") +
+    kvRow("高度(相對)", v.rel_alt !== null && v.rel_alt !== undefined ? fmt(v.rel_alt, 1) + " m" : "—",
+          v.rel_alt !== null && v.rel_alt !== undefined && v.rel_alt <= 0 ? "bad" : "") +
+    // 測地實際用的離地高度：home 基準壞掉時（實機遇過 rel_alt = -2.3m）
+    // 這兩個值會明顯不同，操作員要看得出來現在信的是哪一個
+    kvRow("離地高度(測地用)",
+          v.height_agl !== null && v.height_agl !== undefined
+            ? `${fmt(v.height_agl, 1)} m（${v.height_source === "rangefinder" ? "測距儀" : "相對 home"}）`
+            : "—",
+          v.height_source === "rangefinder" ? "good" : "") +
     kvRow("Home", v.home_set ? "已取得" : "未取得", v.home_set ? "good" : "bad") +
     // 「有回報」不等於「實測」：PX4 會拿指令角合成同一則訊息，長得一模一樣。
     // 測地精度差在這裡，所以標示要分得出來。

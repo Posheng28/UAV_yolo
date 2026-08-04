@@ -166,6 +166,7 @@ class TrackerEngine:
         self.last_roi_t: float | None = None
         self.last_gimbal_cmd: tuple[float, float] | None = None  # (pitch_rad, yaw_rad)
         self.last_meas_note = ""
+        self.height_source = "home"   # 測地用的高度來源（home / rangefinder）
         # 從空集合起始（而非 None）：引擎還沒處理過任何幀時，任何手動鎖定
         # 都該被拒絕——否則驗證被 getattr 預設值跳過，亂點 ID 也回 ok。
         self._last_track_ids: set[int] = set()
@@ -332,6 +333,24 @@ class TrackerEngine:
     # command）：不加鎖的話「關檔」與「寫入」交錯會對已關閉的檔案物件寫入，
     # 或半行 JSON 撕裂。鎖只包 I/O，粒度極小，不影響迴圈速率。
 
+    def _prune_mission_videos(self) -> None:
+        """只保留最近 N 部任務影片。
+
+        影片是覆盤最有價值的東西，但也是唯一會失控成長的：實測一個下午
+        13 趟 = 414MB（mp4v）。JSONL 才 1.5MB。舊的留著沒人看，硬碟卻會滿。
+        設 0 = 不刪。
+        """
+        keep = int(self.cfg.get("system.mission_video_keep", 12))
+        if keep <= 0:
+            return
+        try:
+            vids = sorted(self._mission_dir().glob("mission_*.mp4"),
+                          key=lambda p: p.stat().st_mtime)
+            for old in vids[:max(0, len(vids) - keep + 1)]:   # +1：留位子給即將開的這部
+                old.unlink(missing_ok=True)
+        except Exception:
+            pass          # 清理失敗不能擋任務
+
     def _mission_video_open(self, stem: str) -> None:
         """任務錄影：把「操作員看到的疊圖畫面」逐幀寫成影片。
 
@@ -347,11 +366,20 @@ class TrackerEngine:
             w, h = self._mission_video_size or (1280, 720)
             w, h = max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
             path = self._mission_dir() / f"{stem}.mp4"
-            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-            if not writer.isOpened():
-                writer.release()
+            # avc1(H.264) 比 mp4v 小約一半以上（實測隨機雜訊 2.3 倍，真實畫面
+            # 差距更大）。一個下午 13 趟就產生 414MB，編碼效率不是小事。
+            # 不是每台機器都有 H.264 編碼器，所以留 mp4v 當退路。
+            writer = None
+            for tag in ("avc1", "mp4v"):
+                cand = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*tag), fps, (w, h))
+                if cand.isOpened():
+                    writer = cand
+                    break
+                cand.release()
+            if writer is None:
                 self.loop_error = f"任務錄影開檔失敗（codec 不支援？）：{path.name}"
                 return
+            self._prune_mission_videos()
             self._mission_video = writer
             self._mission_video_wh = (w, h)
             self._mission_video_path = path
@@ -648,18 +676,17 @@ class TrackerEngine:
         if R_wc is None:
             self.last_meas_note = "無姿態資訊（雲台/機體）"
             return None
-        # 🔴 相對高度 ≤0 時測地在幾何上就無解：地面被定義成「home 高度的水平面」
-        # （NED z=0），飛機若在那個平面底下，往下的射線永遠不會再碰到它，
-        # intersect_ground 每幀都回 None。實機遇過 rel_alt = -3m（home 取在
-        # 較高處或高度基準漂移），症狀是「框是紅的、清單顯示已鎖定，但一筆
-        # 座標都算不出來」——不講清楚的話完全看不出是高度的問題。
-        alt = float(getattr(pos, "rel_alt", 0.0) or 0.0)
+        alt, self.height_source = self._height_agl(pos, att)
+        # 🔴 離地高度 ≤0 時測地在幾何上就無解：地面是「離飛機 alt 公尺的水平面」，
+        # alt 不為正時往下的射線永遠碰不到它，intersect_ground 每幀都回 None。
+        # 實機遇過 rel_alt = -2.3m（飛機明明在飛，卻被回報在 home 底下），
+        # 症狀是「框是紅的、清單顯示已鎖定，卻一筆座標都算不出來、零指令」。
         if alt <= 0.2:
             self.last_meas_note = (
-                f"載具相對高度 {alt:.1f}m（≤0）：射線打不到地面，測地無解。"
-                "請確認 home 高度基準，或先起飛到 home 之上")
+                f"離地高度 {alt:.1f}m（≤0，來源：{self.height_source}）：射線打不到地面，"
+                "測地無解。請在起飛點重新解鎖以重設 home，或確認測距儀/高度基準")
             return None
-        vehicle_ned = self.georef.lla_to_ned(pos.lat, pos.lon, pos.rel_alt)
+        vehicle_ned = self.georef.lla_to_ned(pos.lat, pos.lon, alt)
         u, v = det.ground_pixel
         hit = geolocate_pixel(u, v, self.camera_model, R_wc, vehicle_ned)
         if hit is None:
@@ -728,6 +755,40 @@ class TrackerEngine:
     # ------------------------------------------------ 導引 + 雲台
 
     DEADBAND_VIEW_FRACTION = 0.5   # deadband 最多吃掉「短邊半視野」的幾成
+    RANGEFINDER_MAX_AGE_S = 1.0    # 超過就當沒有（同 telemetry 的新鮮度尺度）
+    RANGEFINDER_MAX_TILT_DEG = 20.0  # 傾角太大時測距儀量的是斜距，別用
+
+    def _height_agl(self, pos, att) -> tuple[float, str]:
+        """測地要用的「離地高度」，以及它的來源（給 UI 與記錄）。
+
+        🔴 為什麼優先用測距儀：平地假設需要的是「飛機離目標所在地面的高度」。
+        rel_alt 是「相對 home 高度」，兩者只有在 home 剛好等於地面高度時才相等。
+        實機（2026-08-04）home 基準偏掉後 rel_alt 回報 -2.3m，測地整趟無解、
+        零指令；而且即使 rel_alt 為正，home 偏 Δ 公尺會讓測地距離整體差
+        h/(h+Δ) 倍——3m 高、偏 3m 就是 50% 誤差，不是小事。
+        測距儀直接量離地高度，不受 home 影響，低空還是公分級。
+
+        不可用的情況要退回 rel_alt：超出量程、資料過期、機身傾角過大
+        （傾斜時量到的是斜距不是垂直高度）。
+        """
+        mode = str(self.cfg.get("camera.height_source", "auto")).strip().lower()
+        rel = float(getattr(pos, "rel_alt", 0.0) or 0.0)
+        if mode == "home":
+            return rel, "home"
+
+        d = getattr(self.link.store, "distance", None)
+        if d is not None and d.usable():
+            age = self.clock() - d.t
+            tilt = 0.0
+            if att is not None:
+                tilt = math.degrees(math.hypot(att.roll, att.pitch))
+            if age <= self.RANGEFINDER_MAX_AGE_S and tilt <= self.RANGEFINDER_MAX_TILT_DEG:
+                # 傾斜時測到的是斜距，投影回垂直分量
+                return d.current_m * math.cos(math.radians(tilt)), "rangefinder"
+        if mode == "rangefinder":
+            # 指定只用測距儀卻拿不到 → 誠實回 0，讓上層擋下並說明
+            return 0.0, "rangefinder(無效)"
+        return rel, "home"
 
     def _effective_deadband(self, pos) -> float:
         """指令重發門檻，但不得大於相機看得到的範圍。
@@ -1142,6 +1203,14 @@ class TrackerEngine:
                 "lat": getattr(pos, "lat", None),
                 "lon": getattr(pos, "lon", None),
                 "rel_alt": getattr(pos, "rel_alt", None),
+                # 測地實際用的離地高度與來源。rel_alt 壞掉時（home 基準偏移）
+                # 兩者會明顯不同，操作員要看得出來現在信的是哪一個。
+                "height_agl": (None if pos is None else
+                               round(self._height_agl(pos, None)[0], 2)),
+                "height_source": self.height_source,
+                "rangefinder_m": (round(d.current_m, 2)
+                                  if (d := getattr(store, "distance", None)) is not None
+                                  and d.usable() else None),
                 "mode": hb.mode if hb else None,
                 "armed": hb.armed if hb else False,
                 "link_ok": store.link_alive(now, self.gates.link_timeout_s),

@@ -230,6 +230,39 @@ def report(path: Path) -> None:
                   + ("   ← 偏低代表飛機沒追上或在繞圈" if inside < 0.7 * len(d) else ""))
 
 
+def trim(path: Path) -> None:
+    """就地剪掉作用時段之後的閒置 snap（導引忘了關時，尾巴可以是好幾小時）。
+
+    保留全部非 snap 事件（指令、ACK、影像事件、開關記錄），只砍 snap，
+    所以覆盤需要的東西一個都不會少。
+    """
+    rows = load(path)
+    if not rows:
+        print(f"{path.name}: 空檔")
+        return
+    cmds = [r for r in rows if r.get("event") == "command"]
+    marks = [r["t"] for r in rows
+             if r.get("event") == "snap" and (r.get("tgt") or (r.get("dets") or 0))]
+    marks += [c["t"] for c in cmds]
+    if not marks:
+        print(f"{path.name}: 找不到作用時段（沒有偵測也沒有指令），不動它")
+        return
+    hi = max(marks) + 10.0
+    kept = [r for r in rows if r.get("event") != "snap" or r["t"] <= hi]
+    if len(kept) == len(rows):
+        print(f"{path.name}: 沒有多餘的閒置尾巴")
+        return
+    before = path.stat().st_size
+    tmp = path.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for r in kept:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    tmp.replace(path)                     # 原子置換，中途斷電不會留半個檔
+    print(f"{path.name}: {len(rows)} → {len(kept)} 筆，"
+          f"{before / 1e6:.2f} → {path.stat().st_size / 1e6:.2f} MB"
+          f"（剪掉 {len(rows) - len(kept)} 筆閒置 snap）")
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -238,10 +271,12 @@ def main() -> None:
     ap.add_argument("--file", default=None, help="指定某一份記錄")
     ap.add_argument("--list", action="store_true", help="列出全部")
     ap.add_argument("--pick", type=int, default=1, help="倒數第 N 份（預設 1＝最新）")
+    ap.add_argument("--trim", action="store_true",
+                    help="就地剪掉作用時段之後的閒置 snap（導引忘了關時用）")
     args = ap.parse_args()
 
     if args.file:
-        report(Path(args.file))
+        (trim if args.trim else report)(Path(args.file))
         return
 
     missions = find_missions(Path(args.dir))
@@ -253,6 +288,10 @@ def main() -> None:
             mp4 = p.with_suffix(".mp4")
             print(f"  [{i:2d}] {p.name}  {p.stat().st_size / 1e6:6.1f}MB"
                   f"  {'＋影片' if mp4.exists() else '（無影片）'}")
+        return
+    if args.trim:
+        for p in missions:            # 一次把所有肥掉的都剪乾淨
+            trim(p)
         return
     report(missions[-args.pick])
 

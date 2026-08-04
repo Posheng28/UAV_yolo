@@ -25,6 +25,7 @@ MSG_ID_GPS_RAW_INT = 24
 MSG_ID_EXTENDED_SYS_STATE = 245
 MSG_ID_HOME_POSITION = 242
 MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS = 285
+MSG_ID_DISTANCE_SENSOR = 132
 
 GIMBAL_DEVICE_FLAGS_YAW_LOCK = 16
 
@@ -90,6 +91,34 @@ class LandedSample:
     @property
     def airborne(self) -> bool:
         return self.landed_state in (2, 3, 4)
+
+
+@dataclass
+class DistanceSample:
+    """DISTANCE_SENSOR：離地測距（光流模組多半附帶）。
+
+    為什麼要它：測地把地面定義成「home 高度的水平面」，所以用的是
+    rel_alt（相對 home）。但 home 的高度基準一旦偏掉，整條測地就跟著偏——
+    2026-08-04 實機就遇到 rel_alt 回報 -2.3m（飛機在飛，卻被判在 home 底下），
+    測地每幀無解、一筆指令都發不出去。
+    測距儀量的是「離地真實高度」，不受 home 偏移影響，低空還是公分級精度，
+    正好是平地假設真正需要的那個量。
+    """
+    t: float
+    current_m: float
+    min_m: float
+    max_m: float
+    orientation: int = 25          # MAV_SENSOR_ROTATION_PITCH_270 = 正下方
+
+    @property
+    def downward(self) -> bool:
+        return self.orientation == 25
+
+    def usable(self) -> bool:
+        """讀數在感測器的有效量程內才可信（超出時多半回傳 0 或 max）。"""
+        return (self.downward
+                and math.isfinite(self.current_m)
+                and self.min_m < self.current_m < self.max_m)
 
 
 @dataclass
@@ -159,6 +188,7 @@ class TelemetryStore:
         self.home: Home | None = None
         self.gps: GpsSample | None = None
         self.landed: LandedSample | None = None
+        self.distance: DistanceSample | None = None
         self.last_msg_t: float | None = None
         # 飛控自己講的話（STATUSTEXT）。「為什麼拒絕 arm」只會從這裡出來，
         # 不解析等於把飛控唯一的解釋管道丟掉，操作員只能面對「就是不能 arm」。
@@ -223,6 +253,11 @@ class TelemetryStore:
         with self._lock:
             self.landed = landed
             self.last_msg_t = landed.t
+
+    def set_distance(self, dist: DistanceSample) -> None:
+        with self._lock:
+            self.distance = dist
+            self.last_msg_t = dist.t
 
     # ---- 查詢 ----
 
@@ -466,6 +501,16 @@ class MavlinkConnection:
             elif mtype == "EXTENDED_SYS_STATE":
                 self.store.set_landed(LandedSample(now, int(msg.landed_state)))
 
+            elif mtype == "DISTANCE_SENSOR":
+                # 單位是公分。orientation 25 = 朝正下方（MAV_SENSOR_ROTATION_PITCH_270）
+                self.store.set_distance(DistanceSample(
+                    now,
+                    current_m=float(msg.current_distance) / 100.0,
+                    min_m=float(msg.min_distance) / 100.0,
+                    max_m=float(msg.max_distance) / 100.0,
+                    orientation=int(getattr(msg, "orientation", 25)),
+                ))
+
             elif mtype == "COMMAND_ACK":
                 self.last_ack[msg.command] = (msg.result, now)
 
@@ -609,6 +654,7 @@ class MavlinkConnection:
             "GIMBAL_DEVICE_ATTITUDE_STATUS": MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS,
             "GPS_RAW_INT": MSG_ID_GPS_RAW_INT,
             "EXTENDED_SYS_STATE": MSG_ID_EXTENDED_SYS_STATE,
+            "DISTANCE_SENSOR": MSG_ID_DISTANCE_SENSOR,
         }
         for name, hz in self.stream_rates.items():
             msg_id = name_to_id.get(name)

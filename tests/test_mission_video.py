@@ -75,6 +75,38 @@ def test_recording_can_be_disabled(tmp_path):
         engine.set_guidance_enabled(False)
 
 
+def test_deadband_never_exceeds_what_the_camera_can_see(tmp_path):
+    """🔴 指令重發門檻不能大於可視範圍，否則控制迴路失去意義。
+
+    實飛數據：deadband 設 3.0m，而 3.1m 高度下短邊視野全長只有 3.6m。
+    車子幾乎要走完整個畫面，指令才更新一次（實測間隔 2.4 秒 vs 穿越畫面
+    3.6 秒）——飛機永遠在追 3 秒前的位置，結果繞著目標打轉、半徑約 5m、
+    週期約 10 秒，收斂不進去。
+    """
+    engine = make_engine(tmp_path)
+    engine.reposition_deadband_m = 3.0
+
+    import math
+
+    def at(alt):
+        return engine._effective_deadband(type("P", (), {"rel_alt": alt})())
+
+    def half_view(alt):
+        return math.tan(math.radians(engine.camera_model.vfov_deg / 2.0)) * alt
+
+    low = at(3.1)
+    # 不變量與鏡頭無關：門檻必須明顯小於「短邊半視野」，指令才來得及在
+    # 目標離開畫面前更新。綁死絕對數字會隨鏡頭改變而失效。
+    assert low < half_view(3.1), (
+        f"3.1m 高時 deadband {low:.2f}m 不小於半視野 {half_view(3.1):.2f}m")
+    assert low < 3.0, "低空時必須比設定值收得更緊"
+    assert low >= 0.5, "太小也沒意義（發送本來就有 1Hz 限速）"
+    assert at(6.0) > low, "門檻要隨高度放寬"
+    assert at(40.0) == pytest.approx(3.0), "高空時應回到設定值，不該被壓小"
+    # 沒有高度資訊時退回設定值，不要自作聰明
+    assert engine._effective_deadband(None) == pytest.approx(3.0)
+
+
 def test_reacquire_gate_scales_with_altitude(tmp_path):
     """🔴 重鎖門檻必須跟著高度縮放。
 

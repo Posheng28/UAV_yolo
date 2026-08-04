@@ -155,3 +155,9 @@ class CameraModel:
     @property
     def hfov_deg(self) -> float:
         return math.degrees(2.0 * math.atan(self.width / (2.0 * self.K[0, 0])))
+
+    @property
+    def vfov_deg(self) -> float:
+        """垂直視角。天底跟隨時「短邊」才是決定目標多快出框的那一邊，
+        所以控制迴路的時間尺度要看它，不是看水平視角。"""
+        return math.degrees(2.0 * math.atan(self.height / (2.0 * self.K[1, 1])))

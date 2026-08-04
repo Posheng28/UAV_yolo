@@ -716,6 +716,29 @@ class TrackerEngine:
 
     # ------------------------------------------------ 導引 + 雲台
 
+    DEADBAND_VIEW_FRACTION = 0.5   # deadband 最多吃掉「短邊半視野」的幾成
+
+    def _effective_deadband(self, pos) -> float:
+        """指令重發門檻，但不得大於相機看得到的範圍。
+
+        🔴 2026-08-04 實飛：設定的 deadband 是 3.0m，而 3.1m 高度下短邊視野
+        全長只有 3.6m（半邊 1.79m）。等於「車子幾乎走完整個畫面，指令才更新
+        一次」——實測指令間隔 2.4 秒、車子穿越畫面 3.6 秒，飛機永遠在追 3 秒前
+        的位置，結果是繞著目標打轉、半徑約 5m、週期約 10 秒，收斂不進去。
+        deadband 的用途是抑制抖動，不該大到讓控制迴路失去意義，所以用
+        高度換算出的可視範圍把它夾住；高空時設定值本來就較小，不受影響。
+        """
+        base = self.reposition_deadband_m
+        alt = float(getattr(pos, "rel_alt", 0.0) or 0.0)
+        if alt <= 0.0:
+            return base
+        try:
+            half_v = math.tan(math.radians(self.camera_model.vfov_deg / 2.0)) * alt
+        except Exception:
+            return base
+        # 下限 0.5m：再小也沒意義（發送本來就有 1Hz 限速），只會徒增指令量
+        return max(0.5, min(base, self.DEADBAND_VIEW_FRACTION * half_v))
+
     def _current_home_ne(self) -> np.ndarray:
         """目前 home 在（鎖定於第一筆 home 的）NED 座標系裡的位置。
 
@@ -851,9 +874,9 @@ class TrackerEngine:
         # 這比任何安全門檻都優先——寧可完全不發，也不要發一個高度是錯的指令。
         # 查核要用「拿得到的最新位置」：影像斷線時 _last_capture_t 會凍在最後
         # 一幀，拿舊時刻去查等於永遠在驗一筆陳年樣本。
-        alt_ref_problem = self._altitude_reference_sane(
-            store.position_at(max(self._last_capture_t or -math.inf,
-                                  now - self.video_latency_s)))
+        pos_for_check = store.position_at(max(self._last_capture_t or -math.inf,
+                                              now - self.video_latency_s))
+        alt_ref_problem = self._altitude_reference_sane(pos_for_check)
         if alt_ref_problem:
             report.blocked.append(alt_ref_problem)
             report.ok = False
@@ -865,17 +888,18 @@ class TrackerEngine:
         if cmd is None or not report.ok or self.georef is None:
             return
 
+        deadband = self._effective_deadband(pos_for_check)
         if self.last_cmd is not None:
             moved = float(np.linalg.norm(cmd.point_ne - self.last_cmd.point_ne))
             # deadband 內仍要定期重發（keepalive）：engine 的「已發送」只代表
             # 交給了後端——LR24 走非同步通道，逾時/被拒/過期丟棄後若目標靜止，
             # deadband 會讓這筆指令永遠不再送出（飛機停在原地、閘門卻全綠）。
             # 直連 MAVLink 重發同一點是冪等的，代價只是每 cmd_refresh_s 一幀。
-            if moved < self.reposition_deadband_m and (now - self.last_cmd.t) < self.cmd_refresh_s:
+            if moved < deadband and (now - self.last_cmd.t) < self.cmd_refresh_s:
                 # 正常節流，但要讓操作員看得出「現在沒在發」的原因，
                 # 否則閘門全綠卻不動會被誤判成系統掛了。
                 self.guidance_note = (
-                    f"目標僅移動 {moved:.1f}m（< {self.reposition_deadband_m:.0f}m 門檻），維持現有指令"
+                    f"目標僅移動 {moved:.1f}m（< {deadband:.1f}m 門檻），維持現有指令"
                 )
                 return
         self.guidance_note = ""

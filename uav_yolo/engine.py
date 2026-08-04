@@ -383,6 +383,13 @@ class TrackerEngine:
             self._mission_video = writer
             self._mission_video_wh = (w, h)
             self._mission_video_path = path
+            # mp4 的索引（moov atom）只在 release() 時寫入：行程被強制結束就
+            # 留下一個「有資料但讀不出任何一幀」的廢檔（實測 181.9MB / 0 幀）。
+            # atexit 擋不住 SIGKILL，但正常結束、Ctrl-C、uvicorn 收 SIGTERM
+            # 都救得回來，涵蓋絕大多數情況。
+            import atexit
+
+            atexit.register(self._mission_video_close)
             self._mission_video_next_t = 0.0
             self._mission_video_dt = 1.0 / max(fps, 1.0)
         except Exception as exc:
@@ -392,6 +399,12 @@ class TrackerEngine:
     def _mission_video_write(self, frame, now: float) -> None:
         w = self._mission_video
         if w is None or frame is None:
+            return
+        # 🔴 只在「有事發生」時錄。導引忘了關的話，飛機早就落地了影片還在錄
+        # 地面——實測產生一個 181.9MB、內容是 7.5 分鐘靜止畫面的檔案，而該趟
+        # 真正的飛行只有 190 秒。判準與任務記錄的節流一致：解鎖中或有目標估計。
+        if not (bool(getattr(self.link.store.heartbeat, "armed", False))
+                or self.estimator.initialized):
             return
         if now < self._mission_video_next_t:
             return                      # 依設定的 fps 抽幀，別把磁碟寫爆

@@ -264,3 +264,37 @@ def test_height_source_can_be_forced_to_home(tmp_path):
     pos = SimpleNamespace(lat=24.0, lon=120.0, rel_alt=5.0, alt_amsl=100.0, vn=0.0, ve=0.0)
     att = SimpleNamespace(roll=0.0, pitch=0.0, yaw=0.0)
     assert engine._height_agl(pos, att) == (5.0, "home")
+
+
+def test_recording_stops_when_nothing_is_happening(tmp_path):
+    """🔴 導引忘了關時，影片不該繼續錄地面。
+
+    實測後果：一個 181.9MB 的檔案，內容是 7.5 分鐘的靜止地面，而該趟真正
+    的飛行只有 190 秒；一個下午 13 趟共 414MB，JSONL 才 1.5MB。
+    """
+    engine = make_engine(tmp_path)
+    engine.set_guidance_enabled(True)
+    crank(engine, 2.0)
+    assert engine._mission_video is not None, "測試前提：有事發生時要在錄"
+
+    frame = np.zeros((360, 640, 3), np.uint8)
+    written = []
+    engine._mission_video = type("W", (), {"write": lambda s, f: written.append(1)})()
+
+    # 有事發生（已解鎖）→ 要寫
+    engine.link.store.heartbeat.armed = True
+    engine._mission_video_next_t = 0.0
+    engine._mission_video_write(frame, 100.0)
+    assert written, "解鎖中卻沒在錄"
+
+    # 沒事發生（未解鎖 + 沒有目標估計）→ 不寫
+    written.clear()
+    engine.link.store.heartbeat.armed = False
+    engine.estimator.reset()
+    engine._mission_video_next_t = 0.0
+    engine._mission_video_write(frame, 200.0)
+    assert not written, (
+        "未解鎖且無目標時仍在寫入影片——導引忘了關就會錄出好幾百 MB 的地面")
+
+    engine._mission_video = None
+    engine.set_guidance_enabled(False)

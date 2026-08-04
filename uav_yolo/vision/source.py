@@ -268,6 +268,15 @@ RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 3.0)
 # 或圖傳凍結）時，read() 一路成功、fps 正常、connected=True——舊版完全偵測
 # 不到，凍住的畫面還會被當成新量測餵進 KF。這是軟體端唯一能指認 RF 失鎖的訊號。
 FREEZE_ALERT_S = 1.5         # 畫面實質不變超過這麼久 → 判定停格
+# 🔴 停格持續這麼久就主動重開一次裝置（有冷卻，不是每秒亂重開）。
+# MS2109 這類 HDMI dongle 會在「開啟當下」鎖定輸入格式：先開了擷取、HDMI
+# 訊號後到（VRX 晚供電、圖傳晚鎖定、來源換解析度），dongle 就會一直吐全黑
+# 畫面，read() 全部成功、fps 卻只有 1——**重開才會重新鎖定**。
+# 舊版「一次讀取失敗就整組重開」雖然會把打嗝放大成數秒黑畫面，卻意外具備
+# 這條恢復路徑；改成容忍瞬時失敗之後就消失了。這裡把它以正確的形式加回來：
+# 只在「確定畫面是死的」時重開，而不是任何一次抖動都重開。
+FREEZE_RELATCH_S = 6.0
+FREEZE_RELATCH_COOLDOWN_S = 15.0
 # 取樣點變動比例低於此就算「沒在動」。
 #
 # 兩種誤判的代價完全不對稱，所以門檻刻意偏高：
@@ -325,6 +334,7 @@ class VideoSource:
         self._last_change_t: float | None = None
         self._liveness_n = 0
         self._dark_since: float | None = None
+        self._last_relatch_t = 0.0    # 上次因停格而重開的時刻（冷卻用）
 
     # ---- 事件記錄 ----
 
@@ -651,8 +661,18 @@ class VideoSource:
             # 錯誤字串每次都重寫：它是唯一告訴操作員「這是圖傳失鎖、不是 USB」
             # 的診斷。原本只在進入停格的那一瞬間寫一次，之後任何一次讀取失敗
             # 都會把它蓋掉且永不回來（實測 7 次失敗後訊息永久消失）。
-            self.error = (f"影像停格 {held:.0f}s：採集卡有訊號但畫面沒變"
-                          f"（{'畫面幾乎全黑，疑似圖傳失鎖' if self.blank else '疑似圖傳/雲台端凍結'}）")
+            #
+            # 全黑與「有畫面但不動」要分開講，處置完全不同：全黑＝採集卡根本
+            # 沒收到 HDMI 訊號（VRX 沒電／線沒插好／圖傳沒鎖定），去查機器；
+            # 有內容但不動＝訊號在、來源端凍結，去查相機/雲台/RF。
+            if self.blank:
+                self.error = (
+                    f"採集卡收不到 HDMI 訊號（畫面全黑 {held:.0f}s，"
+                    f"{self.fps:.0f} FPS）：檢查 VRX 電源、Mini HDMI 接頭、"
+                    "以及機上圖傳是否已鎖定")
+            else:
+                self.error = (f"影像停格 {held:.0f}s：採集卡有訊號但畫面內容沒變"
+                              "（疑似圖傳失鎖或相機/雲台端凍結）")
 
     def _capture_loop(self) -> None:
         try:
@@ -707,6 +727,14 @@ class VideoSource:
                 if now - fps_t0 >= 2.0:
                     self.fps = fps_n / (now - fps_t0)
                     fps_t0, fps_n = now, 0
+                # 畫面死透了就重開一次去重新鎖定 HDMI 輸入（見 FREEZE_RELATCH_S）
+                if (self.frozen and self.mode in ("uvc", "obs")
+                        and (now - self._last_relatch_t) >= FREEZE_RELATCH_COOLDOWN_S
+                        and (now - (self._last_change_t or now)) >= FREEZE_RELATCH_S):
+                    self._last_relatch_t = now
+                    self._note("video_relatch",
+                               still_s=round(now - (self._last_change_t or now), 1))
+                    self._reconnect("frozen_relatch")
                 continue
 
             # ---- 讀取失敗 ----

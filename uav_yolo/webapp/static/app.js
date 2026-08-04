@@ -260,7 +260,8 @@ function renderStatus(st) {
   if (!st.video.connected) {
     vtxt = vh.reopen_total ? `未連線（已重開 ${vh.reopen_total} 次）` : "未連線";
   } else if (vh.frozen) {
-    vtxt = `⚠ 畫面停格${vh.blank ? "・全黑" : ""}`;
+    // 全黑＝沒收到 HDMI 訊號（查機器）；有內容但不動＝訊號在、來源凍結（查 RF/相機）
+    vtxt = vh.blank ? "⚠ 無 HDMI 訊號（全黑）" : "⚠ 畫面停格";
   } else if (age !== null && age !== undefined && age > 2) {
     vtxt = `⚠ ${fmt(age, 1)}s 未更新`;
   } else {
@@ -272,8 +273,8 @@ function renderStatus(st) {
   // 死畫面以為一切正常。改由引擎回報的真實狀態驅動（見 setVideoDead）。
   setVideoDead(
     !st.video.connected ? "擷取中斷．重新連接中…"
-      : vh.frozen ? (vh.blank ? "畫面停格・全黑（疑似圖傳失鎖）"
-                              : "畫面停格中（採集卡有訊號、畫面沒變）")
+      : vh.frozen ? (vh.blank ? "採集卡收不到 HDMI 訊號（畫面全黑）"
+                              : "畫面停格中（採集卡有訊號、畫面內容沒變）")
       : null
   );
   const ve = $("#video-error");

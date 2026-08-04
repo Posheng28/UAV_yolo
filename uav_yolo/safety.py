@@ -101,6 +101,8 @@ class SafetyGates:
         gps=None,
         landed=None,
         video_frozen: bool = False,
+        target_locked: bool = False,
+        meas_note: str = "",
     ) -> GateReport:
         blocked: list[str] = []
 
@@ -161,7 +163,15 @@ class SafetyGates:
                 elif gps.vdop is not None and gps.vdop > self.gps_max_vdop:
                     blocked.append(f"GPS VDOP {gps.vdop:.1f} > {self.gps_max_vdop}")
         if not est_initialized:
-            blocked.append("尚未鎖定目標")
+            # 🔴 「沒有鎖定」與「鎖定了但算不出座標」是兩件完全不同的事，
+            # 處置也不同（前者去點選目標，後者去查測地為什麼失敗）。
+            # 舊版兩者都印「尚未鎖定目標」，於是畫面上框是紅的、清單寫
+            # 「已鎖定」，閘門卻說沒鎖定——操作員只能困惑。
+            if target_locked:
+                why = meas_note or "尚無有效量測"
+                blocked.append(f"已鎖定目標，但還算不出地面座標：{why}")
+            else:
+                blocked.append("尚未鎖定目標（在畫面或偵測列表點選一台車）")
         elif est_age_s > coast_timeout_s:
             blocked.append(f"目標估計逾時 {est_age_s:.1f}s（> coast {coast_timeout_s:.0f}s）")
         if cmd_point_ne is not None:

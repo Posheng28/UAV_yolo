@@ -142,3 +142,50 @@ def test_reacquire_gate_scales_with_altitude(tmp_path):
 
     # 高空：門檻不該被高度壓死，仍由 KF 不確定度決定
     assert try_at(60.0, 2.0) is True, "高空的正常重鎖不該被擋"
+
+
+# ---------------- 「已鎖定」與「算得出座標」是兩件事 ----------------
+
+def test_locked_but_no_fix_says_why_instead_of_claiming_not_locked(tmp_path):
+    """🔴 實機回報：畫面上紅框寫 LOCKED、清單寫「已鎖定」，閘門卻說
+    「尚未鎖定目標」——兩邊互相矛盾，操作員只能困惑。
+
+    真正的原因是載具 rel_alt = -3m（飛機在 home 高度平面底下），往下的
+    射線永遠碰不到那個平面，測地每幀無解，所以 KF 從未初始化。而閘門那句
+    話看的是「KF 有沒有初始化」，不是「有沒有鎖定」。
+    """
+    from types import SimpleNamespace
+
+    from uav_yolo.safety import SafetyGates
+    from uav_yolo.vision.detector import Detection
+
+    engine = make_engine(tmp_path)
+    crank(engine, 8.0)
+    assert engine.lock.locked, "測試前提：要先鎖上"
+
+    det = Detection(track_id=10, cls_name="Car", conf=0.72, bbox=(400, 250, 460, 300))
+    att = engine.link.store.attitude_at(engine.clock())
+    pos = SimpleNamespace(lat=24.7852, lon=120.9965, rel_alt=-3.0,
+                          alt_amsl=97.0, vn=0.0, ve=0.0)
+    assert engine._geolocate(det, pos, att, engine.clock()) is None
+    note = engine.last_meas_note
+    assert "高度" in note and "-3" in note, f"沒講出是高度的問題：{note}"
+
+    # 閘門要分辨「沒鎖定」與「鎖定了但算不出座標」
+    gates = SafetyGates({"allowed_modes": ["AUTO.LOITER"]}, rate_hz=1.0)
+    common = dict(guidance_enabled=True, mode="AUTO.LOITER", armed=True, link_ok=True,
+                  est_age_s=0.0, coast_timeout_s=8.0, cmd_point_ne=None,
+                  require_gps_quality=False)
+    gates.require_gps_quality = False
+    gates.require_airborne = False
+
+    locked_msg = gates.evaluate(0.0, est_initialized=False, target_locked=True,
+                                meas_note=note, **{k: v for k, v in common.items()
+                                                   if k != "require_gps_quality"}).blocked
+    unlocked_msg = gates.evaluate(0.0, est_initialized=False, target_locked=False,
+                                  meas_note="", **{k: v for k, v in common.items()
+                                                   if k != "require_gps_quality"}).blocked
+    assert any("已鎖定" in g and "算不出" in g for g in locked_msg), locked_msg
+    assert any("高度" in g for g in locked_msg), "閘門要把測地失敗的原因帶出來"
+    assert any("尚未鎖定" in g for g in unlocked_msg), unlocked_msg
+    assert not any("已鎖定" in g for g in unlocked_msg), "沒鎖定時不該說已鎖定"

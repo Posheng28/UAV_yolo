@@ -648,6 +648,17 @@ class TrackerEngine:
         if R_wc is None:
             self.last_meas_note = "無姿態資訊（雲台/機體）"
             return None
+        # 🔴 相對高度 ≤0 時測地在幾何上就無解：地面被定義成「home 高度的水平面」
+        # （NED z=0），飛機若在那個平面底下，往下的射線永遠不會再碰到它，
+        # intersect_ground 每幀都回 None。實機遇過 rel_alt = -3m（home 取在
+        # 較高處或高度基準漂移），症狀是「框是紅的、清單顯示已鎖定，但一筆
+        # 座標都算不出來」——不講清楚的話完全看不出是高度的問題。
+        alt = float(getattr(pos, "rel_alt", 0.0) or 0.0)
+        if alt <= 0.2:
+            self.last_meas_note = (
+                f"載具相對高度 {alt:.1f}m（≤0）：射線打不到地面，測地無解。"
+                "請確認 home 高度基準，或先起飛到 home 之上")
+            return None
         vehicle_ned = self.georef.lla_to_ned(pos.lat, pos.lon, pos.rel_alt)
         u, v = det.ground_pixel
         hit = geolocate_pixel(u, v, self.camera_model, R_wc, vehicle_ned)
@@ -869,6 +880,8 @@ class TrackerEngine:
             gps=getattr(store, "gps", None),
             landed=getattr(store, "landed", None),
             video_frozen=bool(getattr(self.video, "frozen", False)),
+            target_locked=bool(self.lock.locked),
+            meas_note=self.last_meas_note,
         )
         # 高度基準不一致時，送出去的 AMSL 高度會錯得離譜（實測可差 135m）。
         # 這比任何安全門檻都優先——寧可完全不發，也不要發一個高度是錯的指令。
@@ -1084,7 +1097,12 @@ class TrackerEngine:
             if span > 0:
                 loop_hz = (len(self._loop_times) - 1) / span
 
-        target: dict = {"initialized": self.estimator.initialized}
+        # meas_note 要放在 initialized 分支**外面**：最需要看到「量測為什麼
+        # 失敗」的時刻，正是估計器還沒起來的時候（框是紅的、清單顯示已鎖定，
+        # 卻一筆座標都算不出來）。原本只在 initialized 時才附上，等於永遠看不到。
+        target: dict = {"initialized": self.estimator.initialized,
+                        "locked": bool(self.lock.locked),
+                        "meas_note": self.last_meas_note}
         if self.estimator.initialized:
             age = self.estimator.time_since_update(self._last_capture_t or now)
             p = self.estimator.pos_ne

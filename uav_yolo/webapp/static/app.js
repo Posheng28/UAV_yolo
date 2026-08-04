@@ -196,8 +196,14 @@ function renderStatus(st) {
     tHtml += kvRow("位置 (N,E)", `${fmt(t.n, 0)}, ${fmt(t.e, 0)} m`);
     tHtml += kvRow("量測時間差", `${fmt(t.age_s)} s`, t.age_s > 2 ? "bad" : "good");
     tHtml += kvRow("不確定度", `±${fmt(t.pos_std)} m`);
+  } else if (t.locked) {
+    // 已鎖定卻沒有座標：最需要診斷的狀態。舊版這裡寫「尚未鎖定目標」，
+    // 而畫面上框是紅的、清單寫「已鎖定」，兩邊互相矛盾，操作員只能困惑。
+    tHtml += kvRow("狀態", "已鎖定，但還算不出地面座標", "bad");
+    tHtml += kvRow("原因", t.meas_note || "尚無有效量測", "bad");
   } else {
-    tHtml += kvRow("狀態", "尚未鎖定目標", "");
+    tHtml += kvRow("狀態", "尚未鎖定目標（點選畫面或列表中的目標）", "");
+    if (t.meas_note) tHtml += kvRow("上次量測", t.meas_note, "");
   }
   $("#target-info").innerHTML = tHtml;
 

@@ -1190,7 +1190,18 @@ class TrackerEngine:
             result, ack_t = ack
             for rec in reversed(self.cmd_history):
                 if rec["t"] <= ack_t:
-                    rec["ack"] = names.get(int(result), str(result))
+                    verdict = names.get(int(result), str(result))
+                    # 🔴 ACK 也要進任務記錄。原本只回填記憶體裡的 cmd_history，
+                    # 而 command 事件是在「送出當下」寫的、那時 ACK 還沒回來，
+                    # 所以覆盤時**永遠看不到飛控收了沒**——而「指令有沒有被
+                    # 接受」正是事後最想知道的一件事（拒收與上行斷掉的畫面
+                    # 一模一樣：指令列表照長、ACK 欄全空）。
+                    if rec.get("ack") != verdict:
+                        self._mission_write("command_ack", {
+                            "cmd_t": round(rec["t"], 3), "result": verdict,
+                            "label": rec.get("label"),
+                        })
+                    rec["ack"] = verdict
                     break
         status.commands = [dict(r, ago=round(now - r["t"], 1))
                            for r in reversed(self.cmd_history)]

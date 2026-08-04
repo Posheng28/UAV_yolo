@@ -1259,9 +1259,20 @@ class TrackerEngine:
                                round(self._height_agl(pos, None)[0], 2)),
                 "height_source": self.height_source,
                 "alt_drift": self.alt_drift_note,
+                # 可用的讀數（測地會採用的那個）
                 "rangefinder_m": (round(d.current_m, 2)
                                   if (d := getattr(store, "distance", None)) is not None
                                   and d.usable() else None),
+                # 🔴 原始讀數與新鮮度也要出來：光是「rangefinder_m 是 None」
+                # 分不出「飛控根本沒送 DISTANCE_SENSOR」和「有送但讀數超出量程／
+                # 朝向不對」——這兩種的處置完全不同（前者查接線與參數，
+                # 後者查安裝方向或高度）。裝完感測器最需要的就是這個區別。
+                "rangefinder_raw": (None if d is None else round(d.current_m, 2)),
+                "rangefinder_age_s": (None if d is None
+                                      else round(max(0.0, now - d.t), 1)),
+                "rangefinder_range": (None if d is None
+                                      else [round(d.min_m, 2), round(d.max_m, 2)]),
+                "rangefinder_orientation": (None if d is None else d.orientation),
                 "mode": hb.mode if hb else None,
                 "armed": hb.armed if hb else False,
                 "link_ok": store.link_alive(now, self.gates.link_timeout_s),

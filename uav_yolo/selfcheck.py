@@ -258,6 +258,42 @@ def check_home(engine) -> CheckResult:
               f"已取得（高度基準 {engine.home_alt_amsl:.0f}m AMSL），測地原點已鎖定")
 
 
+def check_rangefinder(engine, cfg) -> CheckResult:
+    """測距儀：測地的離地高度來源，比 rel_alt 可靠得多。
+
+    為什麼獨立一項：2026-08-04 的三份 .ulg 顯示 GPS 高度 3 分鐘漂 33m（同機
+    氣壓計只動 2cm），飛控以 GNSS 為高度基準就跟著下去，rel_alt 變負、測地
+    整趟無解。測距儀量的是離地真實高度，不受這個影響。
+    而且「沒送」與「有送但不可用」的處置完全不同，所以要分開講。
+    """
+    mode = str(cfg.get("camera.height_source", "auto")).strip().lower()
+    d = getattr(engine.link.store, "distance", None)
+    if mode == "home":
+        return _r("rangefinder", "測距儀高度", "skip",
+                  "設定為只用 rel_alt（camera.height_source=home）")
+    if d is None:
+        return _r("rangefinder", "測距儀高度", "warn",
+                  "飛控沒有送 DISTANCE_SENSOR：測地只能用 rel_alt（相對 home），"
+                  "home 高度基準一偏，座標就整體偏掉",
+                  "確認測距儀已接好且 PX4 有對應驅動（MAVLink console 下 "
+                  "`listener distance_sensor` 應有輸出）；本站已在串流請求中要這則訊息")
+    age = engine.clock() - d.t
+    if age > 5.0:
+        return _r("rangefinder", "測距儀高度", "warn",
+                  f"最後一筆 DISTANCE_SENSOR 已經是 {age:.0f} 秒前，資料流可能斷了")
+    if not d.downward:
+        return _r("rangefinder", "測距儀高度", "warn",
+                  f"感測器朝向 orientation={d.orientation}（不是朝正下方的 25），"
+                  "測地不會採用", "把朝下的那顆設成 MAV_SENSOR_ROTATION_PITCH_270")
+    if not d.usable():
+        return _r("rangefinder", "測距儀高度", "warn",
+                  f"讀數 {d.current_m:.2f}m 超出量程 {d.min_m:.2f}~{d.max_m:.2f}m（地面上或超高時正常）",
+                  "起飛到量程內即會自動採用")
+    return _r("rangefinder", "測距儀高度", "pass",
+              f"讀數 {d.current_m:.2f}m（量程 {d.min_m:.2f}~{d.max_m:.2f}m），"
+              f"測地目前採用來源：{engine.height_source}")
+
+
 def check_gimbal(engine, cfg) -> CheckResult:
     """雲台：有回報最準（測地優先用回報角度）。"""
     if not engine.gimbal_present or engine.gimbal_control == "none":
@@ -355,6 +391,7 @@ def run_selfcheck(engine, cfg) -> dict:
         check_telemetry(engine, cfg),
         check_gps(engine, cfg),
         check_home(engine),
+        check_rangefinder(engine, cfg),
         check_gimbal(engine, cfg),
         check_command_path(engine, cfg),
         check_pipeline(engine),

@@ -39,8 +39,11 @@ def test_selfcheck_covers_every_link(tmp_path):
     crank(engine, world, 6.0)
     res = run_selfcheck(engine, cfg)
 
+    # rangefinder：測地的離地高度來源。2026-08-04 的 .ulg 顯示 GPS 高度 3 分鐘
+    # 漂 33m（氣壓計只動 2cm），rel_alt 因此變負、測地整趟無解，所以這條鏈路
+    # 值得獨立檢查——而且「沒送」與「有送但不可用」的處置完全不同。
     expected = {"video", "camera", "latency", "detector", "telemetry",
-                "gps", "home", "gimbal", "command", "pipeline"}
+                "gps", "home", "rangefinder", "gimbal", "command", "pipeline"}
     assert set(by_key(res)) == expected, "自檢漏掉鏈路"
     for c in res["checks"]:
         assert c["status"] in ("pass", "warn", "fail", "skip")
@@ -154,5 +157,5 @@ def test_selfcheck_endpoint(tmp_path):
         assert res.status_code == 200
         body = res.json()
         assert body["verdict"] in ("pass", "warn", "fail")
-        assert len(body["checks"]) == 10
+        assert len(body["checks"]) == 11   # 含 rangefinder（見上方 expected 的說明）
         assert body["summary"]

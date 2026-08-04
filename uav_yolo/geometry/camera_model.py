@@ -95,10 +95,17 @@ class CameraModel:
         cached = getattr(self, "_max_inv_r", None)
         if cached is not None:
             return cached
-        k1, k2 = float(self.dist[0]), float(self.dist[1])
-        k3 = float(self.dist[4]) if len(self.dist) > 4 else 0.0
+        d = [float(v) for v in self.dist] + [0.0] * 8
+        k1, k2, k3 = d[0], d[1], d[4]
+        # 有理模型（CALIB_RATIONAL_MODEL，8 個係數）多了分母 k4/k5/k6，
+        # 正是為了讓廣角鏡頭的徑向映射能一路單調到畫面四角。
+        k4, k5, k6 = (d[5], d[6], d[7]) if len(self.dist) >= 8 else (0.0, 0.0, 0.0)
         r = np.linspace(0.0, 3.0, 30001)
-        rd = r * (1.0 + k1 * r**2 + k2 * r**4 + k3 * r**6)
+        num = 1.0 + k1 * r**2 + k2 * r**4 + k3 * r**6
+        den = 1.0 + k4 * r**2 + k5 * r**4 + k6 * r**6
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rd = np.where(np.abs(den) > 1e-12, r * num / den, np.nan)
+        rd = np.nan_to_num(rd, nan=-np.inf)
         turn = int(np.argmax(rd))
         # 折返點就是可用上限；若整段單調（turn 落在尾端）代表沒有折返問題
         value = float(rd[turn]) if turn < len(r) - 1 else float("inf")

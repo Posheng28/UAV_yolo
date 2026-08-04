@@ -25,6 +25,9 @@ class CalibrationSession:
         self.image_size: tuple[int, int] | None = None  # (w, h)
         self.last_found = False
         self.result: dict | None = None
+        # 純量鏡像，讀取時不必拿鎖（見 count 的說明）
+        self.n_views = 0
+        self.computing = False
 
         objp = np.zeros((self.board_size[0] * self.board_size[1], 3), np.float32)
         objp[:, :2] = np.mgrid[0 : self.board_size[0], 0 : self.board_size[1]].T.reshape(-1, 2)
@@ -32,8 +35,15 @@ class CalibrationSession:
 
     @property
     def count(self) -> int:
-        with self._lock:
-            return len(self.img_points)
+        """🔴 刻意不拿鎖。
+
+        compute() 會握著 self._lock 跑 cv2.calibrateCamera，而那個函式的耗時
+        是超線性的——實測 9×6 棋盤、1920×1080：10 張 0.3s、25 張 1.5s、
+        50 張 20.5s、**100 張 211s**。如果 count 也要拿同一把鎖，計算期間
+        `/api/calib/status` 會整個卡住，校正頁看起來就像「按了沒反應」。
+        int 的讀寫在 CPython 是原子的，讀鏡像值安全。
+        """
+        return self.n_views
 
     def find_corners(self, frame) -> np.ndarray | None:
         """找角點（供預覽疊加；不入庫）。"""
@@ -72,20 +82,61 @@ class CalibrationSession:
             self.image_size = (w, h)
             self.obj_points.append(self._objp.copy())
             self.img_points.append(corners)
+            self.n_views = len(self.img_points)
             self.result = None  # 樣本已變，舊結果作廢
         return True
+
+    # 超過這個張數，計算時間開始失控而精度早已飽和（實測見 count 的說明）
+    RECOMMENDED_MAX_VIEWS = 30
+
+    def estimated_compute_s(self) -> float:
+        """粗估這次計算要跑多久（實測資料擬合，用來給操作員一個預期）。"""
+        n = max(self.n_views, 1)
+        return 0.3 * (n / 10.0) ** 3.2
 
     def compute(self) -> dict:
         """執行校正，回傳 {rms, camera_model, hfov_deg}；樣本不足丟 ValueError。"""
         with self._lock:
             if len(self.img_points) < 8:
                 raise ValueError(f"樣本不足：目前 {len(self.img_points)} 張，至少 8 張（建議 15+）")
-            rms, K, dist, _rvecs, _tvecs = cv2.calibrateCamera(
-                self.obj_points, self.img_points, self.image_size, None, None
-            )
-            model = CameraModel(K, dist.reshape(-1), self.image_size[0], self.image_size[1], source="calibrated")
-            self.result = {"rms": float(rms), "camera_model": model, "hfov_deg": model.hfov_deg}
+            self.computing = True
+            try:
+                # 🔴 先用標準 5 參數模型；若它在畫面四角之前就折返（＝去畸變在
+                # 邊緣不可逆、測地會算出離譜座標），改用有理模型重算。
+                #
+                # 這不是「拍不夠多」能解決的：本專案的 FPV 鏡頭 HFOV 91°，
+                # 桶狀畸變強到標準模型的徑向多項式 r(1+k1r²+k2r⁴+k3r⁶) 在
+                # r≈0.88 就折返，而畫面四角在 r≈1.23。實測用 100 張重拍，
+                # 折返半徑只從 0.8795 動到 0.8861——模型本身的極限。
+                # 有理模型多了分母 (1+k4r²+k5r⁴+k6r⁶)，正是為廣角設計的。
+                rms, K, dist, _r, _t = cv2.calibrateCamera(
+                    self.obj_points, self.img_points, self.image_size, None, None
+                )
+                model = self._as_model(K, dist)
+                used = "standard"
+                if model.corner_radius() > model.max_invertible_r:
+                    rms_r, K_r, dist_r, _r2, _t2 = cv2.calibrateCamera(
+                        self.obj_points, self.img_points, self.image_size, None, None,
+                        flags=cv2.CALIB_RATIONAL_MODEL,
+                    )
+                    model_r = self._as_model(K_r, dist_r)
+                    # 只有真的把可逆範圍撐到四角以外才採用，否則留原本的
+                    if model_r.corner_radius() <= model_r.max_invertible_r:
+                        rms, model, used = rms_r, model_r, "rational"
+            finally:
+                self.computing = False
+            self.result = {
+                "rms": float(rms),
+                "camera_model": model,
+                "hfov_deg": model.hfov_deg,
+                "model": used,
+                "invertible_to_corners": model.corner_radius() <= model.max_invertible_r,
+            }
             return self.result
+
+    def _as_model(self, K, dist) -> CameraModel:
+        return CameraModel(K, np.asarray(dist).reshape(-1),
+                           self.image_size[0], self.image_size[1], source="calibrated")
 
     def save(self, path: str) -> None:
         if not self.result:

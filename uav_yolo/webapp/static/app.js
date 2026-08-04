@@ -780,16 +780,46 @@ $("#calib-start").addEventListener("click", async () => {
 });
 
 $("#calib-capture").addEventListener("click", async () => {
-  await post("/api/calib/capture");
+  const res = await post("/api/calib/capture");
+  if (res && res.warn) {
+    const box = $("#calib-result");
+    box.hidden = false;
+    box.innerHTML = `<span style="color:#b5493f">⚠ ${res.warn}</span>`;
+  }
   refreshCalibStatus();
 });
 
+// 🔴 計算可能要跑好幾分鐘：cv2.calibrateCamera 的耗時是超線性的
+// （實測 9×6、1920×1080：10 張 0.3s、25 張 1.5s、50 張 20.5s、100 張 211s）。
+// 原本按下去毫無回饋，看起來就像壞掉——實際上它正在算。
 $("#calib-compute").addEventListener("click", async () => {
-  const res = await post("/api/calib/compute");
+  const btn = $("#calib-compute");
   const box = $("#calib-result");
+  if (btn.disabled) return;
+  const st = await api("/api/calib/status");
+  const est = st && st.estimated_compute_s ? st.estimated_compute_s : null;
+  btn.disabled = true;
+  const label = btn.textContent;
+  const t0 = performance.now();
   box.hidden = false;
-  if (!res.ok) {
-    box.textContent = "計算失敗：" + res.error;
+  const tick = setInterval(() => {
+    const el = (performance.now() - t0) / 1000;
+    btn.textContent = `計算中…${el.toFixed(0)}s`;
+    box.innerHTML = `⏳ 計算中（已 ${el.toFixed(0)} 秒`
+      + (est ? `，${st.count} 張樣本預估約 ${est.toFixed(0)} 秒` : "")
+      + "）…此期間請勿關閉頁面；樣本越多越慢。";
+  }, 500);
+  let res;
+  try {
+    res = await post("/api/calib/compute");
+  } finally {
+    clearInterval(tick);
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+  box.hidden = false;
+  if (!res || !res.ok) {
+    box.textContent = "計算失敗：" + ((res && res.error) || "未知錯誤");
   } else {
     box.innerHTML =
       `<b>RMS 重投影誤差</b>：${res.rms} px ${res.rms < 1 ? "✓ 佳" : "（>1px，建議補拍再算）"}<br>` +

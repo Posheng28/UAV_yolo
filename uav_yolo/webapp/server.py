@@ -397,7 +397,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             found = sess.capture(frame)
         except ValueError as exc:  # 解析度中途改變
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        return {"ok": True, "found": found, "count": sess.count}
+        # 張數過多要當場講：計算時間是超線性的（實測 25 張 1.5s、50 張 20.5s、
+        # 100 張 211s），而精度早就飽和。操作員不會知道多拍要付這個代價。
+        warn = None
+        if sess.count > sess.RECOMMENDED_MAX_VIEWS:
+            warn = (f"已收 {sess.count} 張，遠超過建議的 15~25 張。"
+                    f"精度不會再提升，但「計算」預估要跑 {sess.estimated_compute_s():.0f} 秒。"
+                    "建議按「開始/重來」重收，重點放在**四角與畫面邊緣**的涵蓋率")
+        return {"ok": True, "found": found, "count": sess.count, "warn": warn}
 
     @app.post("/api/calib/compute")
     def calib_compute():
@@ -440,6 +447,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "board": list(sess.board_size),
             "last_found": sess.last_found,
             "has_result": sess.result is not None,
+            # 計算可能長達數分鐘，前端要能顯示「還在算」而不是看起來當掉
+            "computing": bool(getattr(sess, "computing", False)),
+            "estimated_compute_s": round(sess.estimated_compute_s(), 1),
         }
 
     @app.middleware("http")

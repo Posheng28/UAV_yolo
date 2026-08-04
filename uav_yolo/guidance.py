@@ -35,13 +35,19 @@ class MultirotorGuidance:
     """旋翼：跟在目標後方 standoff_m 的位置（standoff_m=0 則正上方）。"""
 
     MIN_SPEED_FOR_BEARING = 1.5  # m/s，低於此速度沿用上次方位，避免方向亂跳
-    SPEED_MARGIN = 1.5           # 指令速度＝目標速度的幾倍（要追得上又不過衝）
-    SPEED_FLOOR_MS = 1.0         # 目標靜止時的最低移動速度
 
     def __init__(self, follow_alt_m: float, standoff_m: float,
-                 max_speed_ms: float = 5.0):
+                 max_speed_ms: float = 2.0,
+                 speed_margin: float = 1.2,
+                 speed_floor_ms: float = 0.5):
         self.follow_alt_m = float(follow_alt_m)
         self.standoff_m = float(standoff_m)
+        # 2026-08-04 實飛回饋「飛太快」。當時 max 5.0／margin 1.5／floor 1.0，
+        # 對 1.6m/s 的玩具車下達到 3.3m/s。低空追小目標時速度不只是舒適度：
+        # 機身一加速就傾斜，相機視軸跟著甩開，而相機幾何正是座標的來源。
+        # 預設改保守（上限 2.0），三個係數都開放到設定檔。
+        self.SPEED_MARGIN = float(speed_margin)
+        self.SPEED_FLOOR_MS = float(speed_floor_ms)
         # 指令速度上限。不設的話 PX4 用 MPC_XY_CRUISE，低空做小距離修正會衝到
         # 約 3m/s、傾角約 17 度——**而傾角會把相機視軸甩開，相機幾何正是
         # 目標座標的來源**。所以速度不是舒適度問題，是精度問題。
@@ -113,5 +119,7 @@ def build_guidance(airframe: str, cfg_guidance: dict):
     return MultirotorGuidance(
         follow_alt_m=mc.get("follow_alt_m", 40.0),
         standoff_m=mc.get("standoff_m", 15.0),
-        max_speed_ms=mc.get("max_speed_ms", 5.0),
+        max_speed_ms=mc.get("max_speed_ms", 2.0),
+        speed_margin=mc.get("speed_margin", 1.2),
+        speed_floor_ms=mc.get("speed_floor_ms", 0.5),
     )

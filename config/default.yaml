@@ -11,6 +11,11 @@ system:
   # 任務記錄：每次「啟用導引」自動開一份 JSONL（指令/ACK/狀態快照/閘門），
   # 關閉導引或引擎停止時收尾。覆盤「那趟為什麼沒追」全靠它。
   mission_log_dir: data/missions
+  # 任務錄影：導引啟用時把「疊了偵測框的畫面」錄成與 JSONL 同名的 .mp4。
+  # JSONL 記得到座標與閘門，記不到「那個框是車還是草」——覆盤時那才是關鍵。
+  mission_video: true
+  mission_video_scale: 0.5   # 相對來源解析度（1920x1080 → 960x540）
+  mission_video_fps: 15.0    # 抽幀寫入，別把磁碟寫爆
 
 vehicle:
   airframe: multirotor  # multirotor=旋翼機 | fixedwing=固定翼
@@ -140,9 +145,13 @@ guidance:
     # 為什麼要限：低空做幾公尺的小修正時，飛控預設會衝到約 3m/s、傾角約 17 度，
     # **而機身一傾斜就把相機視軸甩開，相機幾何正是目標座標的來源**——所以這是
     # 精度問題不是舒適度問題。
-    # 實際送出的值＝目標速度×1.5＋1.0，再夾到此上限：目標靜止就慢慢修（相機穩），
-    # 目標跑起來才放行（追得上）。寫死單一速度兩種情境都顧不好。
-    max_speed_ms: 5.0
+    # 實際送出的值＝目標速度×speed_margin＋speed_floor_ms，再夾到此上限：
+    # 目標靜止就慢慢修（相機穩），目標跑起來才放行（追得上）。
+    # 2026-08-04 實飛回饋「飛太快」：當時上限 5.0／margin 1.5／floor 1.0，
+    # 對 1.6m/s 的玩具車下達到 3.3m/s。低空追小目標已改保守。
+    max_speed_ms: 2.0
+    speed_margin: 1.2       # 指令速度＝目標速度的幾倍
+    speed_floor_ms: 0.5     # 目標靜止時的最低移動速度
   fixedwing:
     orbit_radius_m: 150.0 # standoff 繞行半徑（須大於最小轉彎半徑）
     orbit_dir: cw         # cw | ccw

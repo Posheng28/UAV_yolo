@@ -175,6 +175,13 @@ class TrackerEngine:
         self.cmd_total = 0                            # 本任務累計（deque 會截頂，不能拿 len 當計數）
         self._mission_lock = threading.Lock()         # 開/關/寫跨 HTTP 與迴圈執行緒
         self._video_events: deque = deque(maxlen=50)  # 最近的影像事件（UI 顯示）
+        # 任務錄影（導引開＝開錄、導引關＝收檔）
+        self._mission_video = None
+        self._mission_video_wh = (0, 0)
+        self._mission_video_size: tuple[int, int] | None = None   # 實際來源尺寸
+        self._mission_video_path = None
+        self._mission_video_next_t = 0.0
+        self._mission_video_dt = 1.0 / 15.0
         self.last_known_lla: tuple[float, float] | None = None
         self.gate_report_blocked: list[str] = []
         self.guidance_note = ""
@@ -325,6 +332,58 @@ class TrackerEngine:
     # command）：不加鎖的話「關檔」與「寫入」交錯會對已關閉的檔案物件寫入，
     # 或半行 JSON 撕裂。鎖只包 I/O，粒度極小，不影響迴圈速率。
 
+    def _mission_video_open(self, stem: str) -> None:
+        """任務錄影：把「操作員看到的疊圖畫面」逐幀寫成影片。
+
+        為什麼錄疊圖而不是原始畫面：覆盤時最想知道的是「當下到底鎖到了什麼」，
+        而框線、鎖定標記、狀態文字全在疊圖上。JSONL 記得到座標與閘門，
+        但記不到「那個框是車還是草」——2026-08-04 實飛就卡在這一點。
+        """
+        if not bool(self.cfg.get("system.mission_video", True)):
+            return
+        try:
+            scale = float(self.cfg.get("system.mission_video_scale", 0.5))
+            fps = float(self.cfg.get("system.mission_video_fps", 15.0))
+            w, h = self._mission_video_size or (1280, 720)
+            w, h = max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
+            path = self._mission_dir() / f"{stem}.mp4"
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+            if not writer.isOpened():
+                writer.release()
+                self.loop_error = f"任務錄影開檔失敗（codec 不支援？）：{path.name}"
+                return
+            self._mission_video = writer
+            self._mission_video_wh = (w, h)
+            self._mission_video_path = path
+            self._mission_video_next_t = 0.0
+            self._mission_video_dt = 1.0 / max(fps, 1.0)
+        except Exception as exc:
+            self._mission_video = None
+            self.loop_error = f"任務錄影開檔失敗：{exc}"
+
+    def _mission_video_write(self, frame, now: float) -> None:
+        w = self._mission_video
+        if w is None or frame is None:
+            return
+        if now < self._mission_video_next_t:
+            return                      # 依設定的 fps 抽幀，別把磁碟寫爆
+        self._mission_video_next_t = now + self._mission_video_dt
+        try:
+            tw, th = self._mission_video_wh
+            if (frame.shape[1], frame.shape[0]) != (tw, th):
+                frame = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+            w.write(frame)
+        except Exception:
+            pass                        # 錄影失敗不能擋任務
+
+    def _mission_video_close(self) -> None:
+        w, self._mission_video = self._mission_video, None
+        if w is not None:
+            try:
+                w.release()
+            except Exception:
+                pass
+
     def _mission_open(self) -> None:
         try:
             with self._mission_lock:
@@ -333,6 +392,7 @@ class TrackerEngine:
                 self._mission_fh = open(self._mission_path, "a", encoding="utf-8")
                 self._mission_snap_t = 0.0
                 self.cmd_total = 0
+            self._mission_video_open(self._mission_path.stem)
             self._mission_write("guidance_on", {
                 "airframe": self.airframe,
                 "follow_alt_m": getattr(self.guidance, "follow_alt_m",
@@ -358,6 +418,7 @@ class TrackerEngine:
             "commands_sent": self.cmd_total,
             "pilot_override_latched": self.gates.pilot_override_latched,
         })
+        self._mission_video_close()
         with self._mission_lock:
             try:
                 if self._mission_fh is not None:
@@ -534,7 +595,9 @@ class TrackerEngine:
 
         with self._jpeg_lock:
             self._raw_frame = frame.copy()  # 校正頁要用未疊圖的原始幀
+        self._mission_video_size = (frame.shape[1], frame.shape[0])
         self._render_overlay(frame, detections, locked_det, pos)
+        self._mission_video_write(frame, now)   # 疊圖後才寫，覆盤看得到鎖到什麼
         self._publish_status(now, detections, pos)
         self._loop_times.append(now)
         # 成功走完一輪就清 loop_error（對照 detector_error 的做法）：
@@ -605,7 +668,13 @@ class TrackerEngine:
         return hit[:2]
 
     def _try_reacquire(self, detections, pos, att, frame_t) -> None:
-        gate = max(15.0, 3.0 * self.estimator.pos_std)
+        # 🔴 重鎖門檻必須跟著高度縮放。原本固定 15m 下限，但天底相機在
+        # 3m 高只看得到約 6.3×3.6m 的地面——15m 的門檻比「整個畫面」還寬
+        # 2.5 倍，等於畫面裡**任何一個**偵測都能被當成走失的目標接手。
+        # 2026-08-04 實飛就是這樣：草地誤判被接手成目標，飛機跟著亂飛。
+        # 上限取 2×高度（涵蓋整個視野仍有餘裕），下限 4m 供高空使用。
+        alt = float(getattr(pos, "rel_alt", 0.0) or 0.0)
+        gate = min(max(4.0, 3.0 * self.estimator.pos_std), 2.0 * max(alt, 1.0))
         pred = self.estimator.pos_ne
         best_id, best_d = None, gate
         for det in detections:

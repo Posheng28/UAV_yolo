@@ -29,16 +29,35 @@ def est(speed: float, pos=(0.0, 0.0)):
 def test_stationary_target_gets_a_gentle_speed():
     g = MultirotorGuidance(follow_alt_m=4.0, standoff_m=0.0, max_speed_ms=5.0)
     cmd = g.compute(est(0.0))
-    assert cmd.speed_ms == pytest.approx(1.0), (
+    assert cmd.speed_ms == pytest.approx(g.SPEED_FLOOR_MS), (
         "靜止目標仍全速衝的話，傾角會把相機甩開"
     )
+    assert cmd.speed_ms <= 1.0, "靜止時的底速要夠慢，相機才穩"
 
 
 def test_moving_target_gets_enough_speed_to_keep_up():
     g = MultirotorGuidance(follow_alt_m=4.0, standoff_m=0.0, max_speed_ms=8.0)
     cmd = g.compute(est(3.0))
-    assert cmd.speed_ms == pytest.approx(3.0 * 1.5 + 1.0)
+    assert cmd.speed_ms == pytest.approx(3.0 * g.SPEED_MARGIN + g.SPEED_FLOOR_MS)
     assert cmd.speed_ms > 3.0, "指令速度不能低於目標速度，否則永遠追不上"
+
+
+def test_default_cap_is_conservative_for_low_altitude_following():
+    """2026-08-04 實飛回饋「飛太快」：對 1.6m/s 的玩具車下達到 3.3m/s。
+
+    低空追小目標時，加速造成的機身傾斜會把相機視軸甩開，而相機幾何正是
+    座標來源——所以預設要保守，需要更快再自己調設定。
+    """
+    g = build_guidance("multirotor", {"multirotor": {"follow_alt_m": 3.0, "standoff_m": 0.0}})
+    assert g.max_speed_ms == pytest.approx(2.0)
+    assert g.compute(est(1.6)).speed_ms <= 2.0
+
+
+def test_speed_shape_is_configurable():
+    g = build_guidance("multirotor", {"multirotor": {
+        "follow_alt_m": 3.0, "standoff_m": 0.0,
+        "max_speed_ms": 4.0, "speed_margin": 2.0, "speed_floor_ms": 0.2}})
+    assert g.compute(est(1.0)).speed_ms == pytest.approx(1.0 * 2.0 + 0.2)
 
 
 def test_speed_is_capped():

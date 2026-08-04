@@ -141,3 +141,41 @@ def test_scaled_intrinsics(cam):
     ray_full = cam.pixel_to_ray(960.0, 540.0)
     ray_half = half.pixel_to_ray(480.0, 270.0)
     assert np.allclose(ray_full, ray_half, atol=1e-9)
+
+
+# ---------------- 畸變模型的可逆範圍 ----------------
+
+def test_invertible_radius_stops_at_the_first_turning_point():
+    """🔴 有理模型的分母會過零，極點附近 r_dist 會衝到數百。
+
+    2026-08-04 實測：新校正檔（CALIB_RATIONAL_MODEL，k4..k6 = 0.707/-0.383/-0.231）
+    的分母在某個半徑過零，若用「全域最大值」求可逆上限會得到 208.27——而畫面
+    四角才 1.21，於是「邊緣不可逆就拒收像素」這道防護**完全失效**（沒有任何
+    像素的半徑會超過 208），測地又可以算出離飛機數公里的假座標。
+    單調遞增在哪裡結束，可逆範圍就在哪裡結束。
+    """
+    from uav_yolo.geometry.camera_model import CameraModel
+
+    K = np.array([[952.6, 0, 992.6], [0, 944.9, 497.4], [0, 0, 1.0]])
+    # 實機那組有理係數（[k1,k2,p1,p2,k3,k4,k5,k6]）
+    dist = np.array([0.3469, -0.4274, -0.0003, 0.0007, -0.0781, 0.7073, -0.3830, -0.2313])
+    m = CameraModel(K, dist, 1920, 1080, source="calibrated")
+
+    assert m.max_invertible_r < 1.5, (
+        f"可逆上限 {m.max_invertible_r:.2f} 明顯抓到了分母極點，防護等於沒開")
+    assert 0.5 < m.max_invertible_r < 1.0, f"數值不合理：{m.max_invertible_r}"
+    assert m.corner_radius() > m.max_invertible_r, "這組校正的四角本來就不可逆"
+
+    # 防護要真的生效：畫面四角必須拿不到視線
+    assert m.pixel_to_ray(0.0, 0.0) is None, "四角像素沒有被擋下"
+    assert m.pixel_to_ray(992.6, 497.4) is not None, "畫面中心不該被擋"
+
+
+def test_monotonic_model_reports_no_fold_back():
+    """畸變很輕的鏡頭整段單調，不該被誤判成有折返。"""
+    from uav_yolo.geometry.camera_model import CameraModel
+
+    K = np.array([[900.0, 0, 960.0], [0, 900.0, 540.0], [0, 0, 1.0]])
+    m = CameraModel(K, np.array([0.01, 0.001, 0.0, 0.0, 0.0]), 1920, 1080, source="calibrated")
+    assert m.max_invertible_r == float("inf")
+    assert m.pixel_to_ray(0.0, 0.0) is not None, "沒有折返問題就不該擋任何像素"

@@ -104,11 +104,23 @@ class CameraModel:
         num = 1.0 + k1 * r**2 + k2 * r**4 + k3 * r**6
         den = 1.0 + k4 * r**2 + k5 * r**4 + k6 * r**6
         with np.errstate(divide="ignore", invalid="ignore"):
-            rd = np.where(np.abs(den) > 1e-12, r * num / den, np.nan)
-        rd = np.nan_to_num(rd, nan=-np.inf)
-        turn = int(np.argmax(rd))
-        # 折返點就是可用上限；若整段單調（turn 落在尾端）代表沒有折返問題
-        value = float(rd[turn]) if turn < len(r) - 1 else float("inf")
+            rd = r * num / den
+
+        # 🔴 要找的是**第一個**轉折點，不是全域最大值。
+        # 有理模型的分母會過零（本專案實測 k4..k6 = 0.707/-0.383/-0.231），
+        # 極點附近 rd 會衝到數百；用 argmax 會抓到那個極點，算出
+        # max_invertible_r = 208，於是「畫面邊緣不可逆就拒收」的防護
+        # 完全失效——沒有任何像素的半徑會超過 208。
+        # 單調遞增在哪裡結束，可逆範圍就在哪裡結束，之後的一切都不可信。
+        finite = np.isfinite(rd)
+        sign_flip = np.signbit(den[:-1]) != np.signbit(den[1:])   # 分母過零＝極點
+        decreasing = np.diff(rd) <= 0
+        bad = decreasing | sign_flip | ~finite[:-1] | ~finite[1:]
+        idx = int(np.argmax(bad)) if bad.any() else -1
+        if idx <= 0:
+            value = float("inf")          # 全段單調：沒有折返問題
+        else:
+            value = float(rd[idx])
         self._max_inv_r = value
         return value
 

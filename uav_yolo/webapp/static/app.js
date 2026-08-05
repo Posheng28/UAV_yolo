@@ -111,8 +111,13 @@ function renderStatus(st) {
   if (btn.classList.contains("arming")) {
     btn.textContent = "⚠ 再點一次確認啟用導引（4 秒內）";
   } else {
-    btn.textContent = st.guidance_enabled ? "導引：啟用中（點擊關閉）" : "導引：關閉（點擊啟用）";
-    btn.className = "big-btn " + (st.guidance_enabled ? "on" : "off");
+    // 乾跑一定要一眼看得出來。「以為在發其實沒發」和「以為沒發其實在發」
+    // 都是危險的誤會，所以按鈕文字直接把模式寫進去，不是靠旁邊一個小標籤。
+    const dry = st.dry_run ? "【乾跑・不送出】" : "";
+    btn.textContent = st.guidance_enabled
+      ? `導引：啟用中${dry}（點擊關閉）`
+      : `導引：關閉${dry}（點擊啟用）`;
+    btn.className = "big-btn " + (st.guidance_enabled ? (st.dry_run ? "off" : "on") : "off");
   }
 
   // 接管恢復按鈕：只在「導引開著但被閂鎖」時出現
@@ -130,7 +135,12 @@ function renderStatus(st) {
   // 閘門
   const gates = $("#gate-list");
   // 高度被夾制永遠優先顯示：設定頁寫 4m、實際飛 20m，這種落差不能只在存檔時講一次
-  const altWarn = (st.alt_clamp_note
+  // 乾跑橫幅排在最前面：它改變了「閘門全綠」這句話的意思
+  const dryBanner = st.dry_run
+    ? `<div class="gate-item warn">🧪 乾跑模式：以下全部照算、照記錄，但<b>不會送出任何指令</b>
+       （連雲台 ROI 也不送）。要真的控制飛機請到設定頁把 guidance.dry_run 關掉。</div>`
+    : "";
+  const altWarn = dryBanner + (st.alt_clamp_note
     ? `<div class="gate-item warn">⚠ ${st.alt_clamp_note}</div>` : "")
     // 按下導引會立刻爬/降多少——排在最前面，因為這是「按下去之前」該看的
     + (st.alt_step_note ? `<div class="gate-item warn">${st.alt_step_note}</div>` : "")
@@ -179,8 +189,10 @@ function renderStatus(st) {
   $("#cmd-count").textContent = cmds.length ? `${cmds.length} 筆` : "";
   if (cmds.length) {
     log.innerHTML = cmds.slice(0, 8).map((c) => {
-      const ackCls = c.ack === "ACCEPTED" ? "ok" : (c.ack ? "bad" : "wait");
-      const ackTxt = c.ack || "等待ACK";
+      // 乾跑的那幾筆永遠等不到 ACK（因為根本沒送），要標清楚，
+      // 否則會被誤讀成「送了但飛控沒回應」——那是完全不同的故障。
+      const ackCls = c.dry_run ? "wait" : (c.ack === "ACCEPTED" ? "ok" : (c.ack ? "bad" : "wait"));
+      const ackTxt = c.dry_run ? "未送出（乾跑）" : (c.ack || "等待ACK");
       const spd = c.speed !== null && c.speed !== undefined ? `｜${c.speed}m/s` : "";
       return `<div class="cmd-row"><span class="mut">${c.wall}</span> ` +
         `N${c.n >= 0 ? "+" : ""}${c.n} E${c.e >= 0 ? "+" : ""}${c.e}｜${c.alt_rel}m${spd} ` +
@@ -578,6 +590,10 @@ const FIELDS = [
   { path: "detector.lock_mode", label: "鎖定方式", type: "select",
     options: [["auto", "自動（最大目標連續幀）"], ["manual", "手動（UI 點選）"]] },
   { path: "detector.min_lock_frames", label: "鎖定所需連續幀", type: "number" },
+  { sec: "導引" },
+  { path: "guidance.dry_run", label: "乾跑模式（勾選＝不送指令）", type: "bool",
+    hint: "整條鏈照跑、指令照算照記錄，但完全不送給飛機（連雲台 ROI 也不送）。"
+          + "真實影像驗證用；儀表板會有明顯標示" },
   { sec: "導引（旋翼）" },
   { path: "guidance.multirotor.follow_alt_m", label: "跟隨高度 m", type: "number" },
   { path: "guidance.multirotor.standoff_m", label: "水平退距 m", type: "number", hint: "0=目標正上方" },

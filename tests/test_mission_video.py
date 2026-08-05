@@ -298,3 +298,52 @@ def test_recording_stops_when_nothing_is_happening(tmp_path):
 
     engine._mission_video = None
     engine.set_guidance_enabled(False)
+
+
+# ---------------- 乾跑模式：算得出來，但送不出去 ----------------
+
+def test_dry_run_computes_commands_but_sends_nothing(tmp_path):
+    """🔴 乾跑的唯一保證：整條鏈照跑、指令照算照記錄，但飛機收不到任何東西。
+
+    用途是拿真實影像＋真實遙測看「系統會下什麼指令」而零風險（固定翼首次驗證）。
+    這個保證一旦破了，使用者會在毫無防備的情況下被系統接管飛機。
+    """
+    engine = make_engine(tmp_path, guidance={"dry_run": True})
+    world = engine.sim_world
+    engine.set_guidance_enabled(True)
+    crank(engine, 15.0)
+    try:
+        assert engine.dry_run is True
+        assert engine.cmd_total > 0, "乾跑仍要算出指令，否則就看不到系統打算做什麼"
+        assert len(world.repositions) == 0, "乾跑竟然真的送出了 reposition 指令"
+        assert len(world.rois) == 0, "乾跑竟然送出了雲台 ROI 指令"
+
+        st = engine.status()
+        assert st.dry_run is True, "UI 必須看得出來現在是乾跑"
+        assert all(c.get("dry_run") for c in st.commands), "指令記錄要標明未送出"
+    finally:
+        engine.set_guidance_enabled(False)
+
+
+def test_live_mode_actually_sends(tmp_path):
+    """反向保護：沒開乾跑時一定要真的送，否則乾跑旗標就成了靜默失效的開關。"""
+    engine = make_engine(tmp_path)
+    world = engine.sim_world
+    engine.set_guidance_enabled(True)
+    crank(engine, 15.0)
+    try:
+        assert engine.dry_run is False
+        assert len(world.repositions) > 0, "非乾跑模式卻沒有送出任何指令"
+        assert not any(c.get("dry_run") for c in engine.status().commands)
+    finally:
+        engine.set_guidance_enabled(False)
+
+
+def test_dry_run_can_be_toggled_without_restarting(tmp_path):
+    """從「只看不送」切成「真的送」不該需要重啟引擎，而且要回報給操作員。"""
+    engine = make_engine(tmp_path, guidance={"dry_run": True})
+    assert engine.dry_run is True
+    engine.cfg.override({"guidance": {"dry_run": False}})
+    applied = engine.apply_live_config()
+    assert engine.dry_run is False
+    assert any("乾跑" in a for a in applied), f"切換沒有回報給操作員：{applied}"

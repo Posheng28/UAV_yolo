@@ -90,6 +90,7 @@ class EngineStatus:
     mission_log: str | None = None     # 任務記錄檔名（導引啟用中才有）
     latched: bool = False              # 飛行員接管閂鎖：UI 要顯示專用的恢復按鈕
     seq: int = 0                       # 發布序號：前端偵測「引擎凍結但 HTTP 還活著」用
+    dry_run: bool = False              # 乾跑：算出指令但不送出（真實影像驗證用）
 
 
 class TrackerEngine:
@@ -137,6 +138,8 @@ class TrackerEngine:
             cfg.get(f"guidance.{deadband_key}.reposition_deadband_m", 3.0)
         )
         self.cmd_refresh_s = float(cfg.get("guidance.cmd_refresh_s", 20.0))
+        # 乾跑：整條鏈照跑但不送出任何指令（真實影像驗證用）
+        self.dry_run = bool(cfg.get("guidance.dry_run", False))
 
         from .vision.detector import TargetLock
 
@@ -265,6 +268,11 @@ class TrackerEngine:
             cfg.get(f"guidance.{deadband_key}.reposition_deadband_m", 3.0)
         )
         self.cmd_refresh_s = float(cfg.get("guidance.cmd_refresh_s", 20.0))
+        # 乾跑開關要能即時切換：飛行中想從「觀察」轉成「真的發」不該重啟引擎
+        was_dry = self.dry_run
+        self.dry_run = bool(cfg.get("guidance.dry_run", False))
+        if was_dry != self.dry_run:
+            applied.append("乾跑模式：" + ("開（不送指令）" if self.dry_run else "關（會真的送）"))
         applied.append("guidance")
         # 存檔當下就要講：填 4m 卻被夾成 20m，等飛上去才發現就太遲了
         alt_warn = self.alt_clamp_warning()
@@ -1067,13 +1075,17 @@ class TrackerEngine:
         # 灌爆。送不出去是要重試沒錯，但必須照 guidance.rate_hz 的節奏重試。
         self.gates.mark_sent(now)
         try:
-            self.link.send_reposition(  # speed_ms 為 None 時各後端自行退回飛控預設
-                lat, lon, alt_amsl,
-                alt_rel_m=cmd.alt_rel_m,   # LR24 GOTO 用相對 home 高度；MAVLink 直連忽略
-                loiter_radius_m=cmd.loiter_radius_m,
-                loiter_ccw=cmd.loiter_ccw,
-                speed_ms=cmd.speed_ms,
-            )
+            # 🔴 乾跑：整條鏈照跑（偵測→測地→KF→導引→閘門），指令也照算照記錄，
+            # 只是不送出去。用途是拿真實影像與真實遙測驗證「系統會下什麼指令」，
+            # 而飛機完全不會收到任何東西——固定翼首次驗證、或不想冒險時用。
+            if not self.dry_run:
+                self.link.send_reposition(  # speed_ms 為 None 時各後端自行退回飛控預設
+                    lat, lon, alt_amsl,
+                    alt_rel_m=cmd.alt_rel_m,   # LR24 GOTO 用相對 home 高度；MAVLink 直連忽略
+                    loiter_radius_m=cmd.loiter_radius_m,
+                    loiter_ccw=cmd.loiter_ccw,
+                    speed_ms=cmd.speed_ms,
+                )
         except Exception as exc:
             # 送不出去必須看得見：靜默失敗會讓操作員盯著「指令發送中」的綠字，
             # 而飛機其實什麼都沒收到。
@@ -1104,6 +1116,7 @@ class TrackerEngine:
                             else round(float(getattr(pos_for_check, "rel_alt", 0.0) or 0.0), 2)),
             "speed": None if cmd.speed_ms is None else round(float(cmd.speed_ms), 1),
             "label": cmd.label,
+            "dry_run": self.dry_run,   # 這筆到底有沒有真的送出去
             "ack": None,   # 由 _publish_status 用 COMMAND_ACK 回填
         }
         self.cmd_history.append(rec)
@@ -1111,6 +1124,10 @@ class TrackerEngine:
         self._mission_write("command", {k: v for k, v in rec.items() if k != "ack"})
 
     def _run_gimbal(self, now: float, pos) -> None:
+        # 乾跑要「一個位元組都不送」，雲台 ROI 也是送給飛機的指令，一併停掉。
+        # 只擋在最外層一處，比在每個 send 前各加一個判斷不容易漏。
+        if self.dry_run:
+            return
         if not self.gimbal_present or self.gimbal_control == "none":
             return
         if not self.estimator.initialized or self.georef is None:
@@ -1460,6 +1477,7 @@ class TrackerEngine:
         status.mission_log = (str(self._mission_path.name)
                               if getattr(self, "_mission_path", None) else None)
         status.latched = self.gates.pilot_override_latched
+        status.dry_run = self.dry_run
         # loop_error 也要即時：例外若發生在 _publish_status **之前**，快照就永遠
         # 停在出事前那一份（顯示「✓ 全部閘門通過，指令發送中」），錯誤本身反而
         # 傳不出去——最需要它的時候看不到，正是最糟的組合。

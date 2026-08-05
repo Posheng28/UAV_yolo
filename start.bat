@@ -67,6 +67,13 @@ if not defined PY goto install_failed
 echo.
 
 :launch
+rem Is one already running? Starting a second is pointless - it cannot bind the
+rem port and dies - and it is actively misleading: :wait_port would see the OLD
+rem server still LISTENING, call it success and open the browser onto it, so the
+rem operator believes they are looking at the instance they just launched.
+call :port_busy
+if %ERRORLEVEL% EQU 0 goto already_running
+
 echo Using Python: %PY%
 echo Starting UAV_yolo ground station ...
 echo URL: http://localhost:%PORT%
@@ -77,6 +84,19 @@ start "UAV_yolo Server" "%~f0" --serve
 call :wait_port
 if %ERRORLEVEL% NEQ 0 goto not_listening
 start "" "http://localhost:%PORT%"
+exit /b 0
+
+:already_running
+echo.
+echo A ground station is ALREADY running on port %PORT%.
+echo This launcher did NOT start a second one - it could not take the port.
+echo Opening the one that is already there: http://localhost:%PORT%
+echo.
+echo To restart it: close its "UAV_yolo Server" window first, then run this
+echo file again. If something else is holding port %PORT%, close that instead.
+echo.
+start "" "http://localhost:%PORT%"
+call :sleep 3
 exit /b 0
 
 :not_listening
@@ -174,6 +194,11 @@ if not defined PY_ANY set "PY_ANY=%~1"
 "%~1" "%~dp0tools\bootstrap.py" --check >nul 2>&1
 if %ERRORLEVEL% EQU 0 set "PY=%~1"
 exit /b 0
+
+:port_busy
+rem Exit 0 when something is already listening on %PORT%.
+netstat -an | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1
+exit /b %ERRORLEVEL%
 
 :wait_port
 rem Wait until the server is actually listening before opening the browser.

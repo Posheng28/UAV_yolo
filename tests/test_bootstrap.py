@@ -299,6 +299,23 @@ def test_start_bat_waits_for_the_port_before_opening_the_browser():
     assert "LISTENING" in text
 
 
+def test_start_bat_refuses_to_start_a_second_server_on_a_busy_port():
+    """🔴 已經有一台在跑時，絕對不能再開第二台然後把瀏覽器指過去。
+
+    第二台根本綁不到埠會馬上死；而 :wait_port 只問「這個埠有沒有人在聽」，
+    舊的那台還聽著 → 判定成功 → 開瀏覽器 → 操作員看到 UI，以為看的是自己
+    剛啟動的那一份。實際踩到：使用者重新 clone 後開得起 UI，但那是幾小時前
+    的舊行程在服務。開起飛前檢查清單時看錯行程是會出事的。
+    """
+    text = bat_text()
+    assert ":port_busy" in text, "啟動前沒有先檢查埠是不是已經被佔用"
+    launch = text[text.index(":launch"):text.index(":serve")]
+    assert "call :port_busy" in launch, ":launch 沒有在 start 之前做這個檢查"
+    assert launch.index("call :port_busy") < launch.index('start "UAV_yolo Server"'), (
+        "檢查排在啟動第二台之後就沒有意義了")
+    assert ":already_running" in text
+
+
 def test_start_bat_uses_setx_for_the_persistent_override():
     """`set` 只活到那個 console 關閉為止——照著做完再雙擊 .bat 一定沒效。"""
     text = bat_text()

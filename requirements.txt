@@ -1,9 +1,21 @@
 numpy>=1.24
 opencv-python>=4.8
 pymavlink>=2.4.37
+# 🔴 pymavlink 沒有宣告 pyserial，但一開 COM 埠就 import serial（mavutil 的
+# mavserial）。開發機剛好被別的套件帶進來過，所以一直沒發現——乾淨環境裝完
+# 實機模式會噴 No module named 'serial'，而錯誤訊息會寫成「COM 埠開啟失敗」，
+# 看起來像接線問題。links.py 的 LR24 通道同樣需要它。
+pyserial>=3.5
 ultralytics>=8.3
 fastapi>=0.110
 uvicorn>=0.27
 PyYAML>=6.0
 pygrabber>=0.2 ; sys_platform == 'win32'
 pytest>=8.0
+# starlette 的 TestClient 靠它發請求（webapp 的測試會用到）。starlette 自己把它
+# 列在 full extra 裡，不裝就是 collection 直接 error——乾淨環境實測過。
+httpx>=0.27
+# tools/analyse_ulog.py 讀 PX4 的 .ulg 要它——那支正是「模式為什麼不可用、
+# 哪一項 GPS 檢查在擋」的診斷工具，出狀況時最會被拿出來用。與 pyserial 同一種
+# 病：開發機被別的東西帶進來過，所以沒宣告也一直沒被發現。
+pyulog>=1.2

@@ -19,6 +19,11 @@ from pathlib import Path
 
 from .tracking import StableIdAssigner
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# 模型載入失敗後隔多久才重試。用意見 Detector._ensure_model。
+MODEL_RETRY_S = 60.0
+
 
 @dataclass
 class Detection:
@@ -73,6 +78,8 @@ class Detector:
         self.fallback_reason: str | None = None  # 想用 DirectML 卻退回 CPU 的原因
         self._model = None
         self._class_ids: set[int] | None = None
+        self._load_error: str | None = None    # 上次載入失敗的原因（見 _ensure_model）
+        self._load_error_t = 0.0
 
     @property
     def tiling(self) -> str:
@@ -91,10 +98,20 @@ class Detector:
 
     @staticmethod
     def _resolve_weights(weights: str) -> str:
-        """自訓權重存在就用，否則退 COCO 預訓練 yolo26n（自動下載）。"""
+        """自訓權重存在就用，否則退 COCO 預訓練 yolo26n（自動下載）。
+
+        退回時給**絕對路徑**指向 weights/：ultralytics 拿到相對名稱會下載到當下的
+        工作目錄，也就是專案根目錄——檔案掉在 repo 根、設定頁的權重下拉又只掃
+        weights/，於是每次啟動都重新下載一次，而使用者看不到它在哪。
+        """
         if weights and Path(weights).exists():
             return weights
-        return "yolo26n.pt"
+        fallback = PROJECT_ROOT / "weights" / "yolo26n.pt"
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return "yolo26n.pt"        # 目錄建不出來就照舊，至少還能跑
+        return str(fallback)
 
     def _apply_class_filter(self, names: dict[int, str]) -> None:
         self._class_ids = build_class_filter(names, self.allowed_names)
@@ -103,7 +120,22 @@ class Detector:
             self._class_ids = build_class_filter(names, ["car", "truck", "bus"])
 
     def _ensure_model(self):
-        if self._model is None:
+        """載入模型；失敗的話記住原因，別每幀重試。
+
+        🔴 沒有這個記憶的話：權重不在本機（新 clone 的 weights/ 是空的）而網路
+        又不通時，ultralytics 每次呼叫都會重新嘗試下載那 5.3MB 的 COCO 模型——
+        而這是在引擎迴圈裡、每一幀都跑一次。整個地面站會卡在逾時上，UI 看起來
+        像當掉，而真正的原因（沒有權重、也連不出去）一句都沒說。
+        野外沒有網路正是最可能發生的地方。
+        """
+        if self._model is not None:
+            return self._model
+
+        now = time.monotonic()
+        if self._load_error is not None and now - self._load_error_t < MODEL_RETRY_S:
+            raise RuntimeError(self._load_error)
+
+        try:
             if self.is_onnx:
                 from .onnx_backend import OnnxRuntimeBackend
 
@@ -119,6 +151,14 @@ class Detector:
 
                 self._model = YOLO(self.weights_path)
                 self._apply_class_filter(self._model.names)
+        except Exception as exc:
+            self._load_error = (
+                f"模型載入失敗（{self.weights_path}）：{exc}。"
+                f"權重不在本機時會自動下載，需要網路；{int(MODEL_RETRY_S)} 秒後才會再試一次")
+            self._load_error_t = now
+            raise RuntimeError(self._load_error) from exc
+
+        self._load_error = None
         return self._model
 
     def set_imgsz(self, value: int) -> str | None:

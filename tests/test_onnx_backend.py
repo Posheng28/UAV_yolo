@@ -4,6 +4,7 @@
 純幾何的 letterbox 測試永遠會跑（它才是座標算錯時的第一道防線）。
 """
 
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,16 @@ from uav_yolo.vision.onnx_backend import export_input_size, letterbox
 
 ROOT = Path(__file__).resolve().parent.parent
 ONNX = ROOT / "weights" / "toycar.onnx"
+
+# 兩個條件都要成立才跑得動：模型檔在，而且 onnxruntime 裝了。
+# 只檢查模型檔是不夠的——onnxruntime 不在 requirements.txt（它是選配的 GPU
+# 加速路徑，而且要裝哪個版本看顯卡廠牌），所以「有模型檔、沒有 onnxruntime」
+# 是完全正常的環境：乾淨安裝的機器上這四項會變成紅字，看起來像專案壞了。
+# 開發機兩者都有，所以這個缺口在這裡永遠不會現形。
+HAVE_ORT = importlib.util.find_spec("onnxruntime") is not None
+NEEDS_ONNX = pytest.mark.skipif(
+    not (ONNX.exists() and HAVE_ORT),
+    reason="需要 weights/toycar.onnx 與 onnxruntime（選配的 GPU 推論路徑）")
 
 
 # ---------------- 匯出尺寸（踩過的雷） ----------------
@@ -35,7 +46,7 @@ def test_export_input_size_handles_portrait_and_square():
     assert export_input_size((720, 720), 640) == (640, 640)     # 正方
 
 
-@pytest.mark.skipif(not ONNX.exists(), reason="尚未匯出 weights/toycar.onnx")
+@NEEDS_ONNX
 def test_exported_model_matches_the_computed_size():
     """實際匯出的模型必須符合上面的規則，否則就是又手算錯了。"""
     import onnxruntime as ort
@@ -99,7 +110,7 @@ def test_set_imgsz_updates_pytorch_backend():
     assert d.imgsz == 640
 
 
-@pytest.mark.skipif(not ONNX.exists(), reason="尚未匯出 weights/toycar.onnx")
+@NEEDS_ONNX
 def test_set_imgsz_refuses_to_pretend_on_static_onnx():
     """ONNX 尺寸是匯出時固定的。改設定值不會有效果——必須回報原因。
 
@@ -114,7 +125,7 @@ def test_set_imgsz_refuses_to_pretend_on_static_onnx():
     assert reason and "重新匯出" in reason
 
 
-@pytest.mark.skipif(not ONNX.exists(), reason="尚未匯出 weights/toycar.onnx")
+@NEEDS_ONNX
 def test_onnx_detector_returns_same_detection_shape():
     """ONNX 路徑要回傳與 PyTorch 路徑同形狀的 Detection，下游才不用改。"""
     import cv2
@@ -135,7 +146,7 @@ def test_onnx_detector_returns_same_detection_shape():
         assert 0 <= y1 < y2 <= frame.shape[0]
 
 
-@pytest.mark.skipif(not ONNX.exists(), reason="尚未匯出 weights/toycar.onnx")
+@NEEDS_ONNX
 def test_onnx_and_pytorch_agree_on_the_same_frames():
     """兩條路徑必須給出實質相同的框。
 

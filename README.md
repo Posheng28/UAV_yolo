@@ -19,18 +19,20 @@ standoff 繞行。附完整 Web 地面站（儀表板／任務檢查清單／參
 
 ## 快速開始
 
+**Windows：雙擊 `start.bat` 就好。**第一次會自動建一個專案內的 `.venv`、
+把相依套件裝進去（會下載 PyTorch，約 2 GB、數分鐘），然後開伺服器＋彈瀏覽器。
+不需要先裝 conda，也不需要改任何路徑；只需要電腦上有 **Python 3.10 以上**
+（沒有的話它會告訴你去哪裝）。詳見 [`start_guide.md`](start_guide.md)。
+
+手動裝／非 Windows：
+
 ```bash
 pip install -r requirements.txt
-
-# 無硬體演練（合成影像+合成飛控，全功能可玩）
-python run.py --sim
-
-# 實機
 python run.py
 ```
 
-Windows 免打指令：雙擊 **`start.bat`**（模擬）或 **`start-live.bat`**（實機），
-會自動開伺服器＋彈瀏覽器。詳見 [`start_guide.md`](start_guide.md)。
+模擬與實機**不是用不同的啟動檔**，是在網頁的設定頁切換後按「重啟引擎」。
+預設是模擬模式，沒有任何硬體也能整套跑起來。
 
 > **要與機上 NYCU_UAV_offboard（RPi/Orin 做 offboard）整合、或想看實體驗證流程？**
 > 讀 [`integration/INTEGRATION.md`](integration/INTEGRATION.md)：架構、接點對照、

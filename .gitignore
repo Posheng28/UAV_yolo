@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
+# start.bat 自動建的專案私有環境（每台機器自己裝，不進 git）
+.venv/
+venv/
+
 # 模型權重（太大不進 git；放 weights/ 即可被程式讀到）
 *.pt
 weights/*

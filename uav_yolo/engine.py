@@ -85,6 +85,7 @@ class EngineStatus:
     detector_error: str | None = None  # 推論丟例外＝畫面看似沒車，必須讓操作員看到
     loop_error: str | None = None      # 迴圈本體例外（比偵測失敗更嚴重）
     alt_clamp_note: str | None = None  # 設定的導引高度被安全上下限夾掉時的說明
+    alt_step_note: str | None = None   # 按下導引會立刻爬/降多少（事前預告）
     commands: list = field(default_factory=list)  # 最近發出的導引指令（新→舊，含 ACK）
     mission_log: str | None = None     # 任務記錄檔名（導引啟用中才有）
     latched: bool = False              # 飛行員接管閂鎖：UI 要顯示專用的恢復按鈕
@@ -922,6 +923,36 @@ class TrackerEngine:
             "——檢查 EKF2_HGT_REF 是否指向未安裝的感測器"
         )
 
+    ALT_STEP_WARN_M = 1.5
+
+    def altitude_step_preview(self) -> str | None:
+        """按下導引之後，飛機會爬升／下降多少？事前講出來。
+
+        🔴 2026-08-05 實機：操作員按下導引，飛機「往上爆飛」。查記錄後發現
+        系統完全照指令執行——當下 rel_alt = -2.13m（home 基準偏了），而
+        follow_alt_m = 2.0m 是**絕對的相對 home 高度、不是「維持現在高度」**，
+        所以那一筆指令的真正意思就是「爬升 4.1 公尺」，5 秒內完成。
+        指令本身沒錯，錯在操作員無從得知按下去會發生什麼。
+        """
+        target = getattr(self.guidance, "follow_alt_m", None)
+        if target is None:
+            target = getattr(self.guidance, "alt_m", None)
+        if target is None:
+            return None
+        target = float(self.gates.clamp_alt(float(target)))
+        pos = self.link.store.position_at(self.clock())
+        cur = getattr(pos, "rel_alt", None) if pos is not None else None
+        if cur is None:
+            return None
+        step = target - float(cur)
+        if abs(step) < self.ALT_STEP_WARN_M:
+            return None
+        verb = "爬升" if step > 0 else "下降"
+        return (f"⚠ 按下導引後飛機會立刻{verb} {abs(step):.1f}m"
+                f"（目前 {float(cur):+.1f}m → 目標 {target:.1f}m，皆為相對 home）。"
+                "跟隨高度是絕對值不是「維持現在高度」；若不預期這個動作，"
+                "先確認 home 基準是否正確（在起飛點重新解鎖可重設 home）")
+
     def alt_clamp_warning(self) -> str | None:
         """導引高度會被安全上下限夾掉時的警告字串（沒被夾則回 None）。
 
@@ -1063,6 +1094,14 @@ class TrackerEngine:
             "e": round(float(cmd.point_ne[1]), 1),
             "lat": round(lat, 7), "lon": round(lon, 7),
             "alt_rel": round(float(cmd.alt_rel_m), 1),
+            # 🔴 真正送進 param7 的是 AMSL（PX4 一律當絕對高度解讀），相對高度
+            # 只是我們的中間值。覆盤時要能看到實際送出的數字與當下的 home 基準，
+            # 否則「為什麼飛機爬到那個高度」永遠對不起來。
+            "alt_amsl": round(float(alt_amsl), 1),
+            "home_amsl": (None if self.home_alt_amsl is None
+                          else round(float(self.home_alt_amsl), 1)),
+            "veh_rel_alt": (None if pos_for_check is None
+                            else round(float(getattr(pos_for_check, "rel_alt", 0.0) or 0.0), 2)),
             "speed": None if cmd.speed_ms is None else round(float(cmd.speed_ms), 1),
             "label": cmd.label,
             "ack": None,   # 由 _publish_status 用 COMMAND_ACK 回填
@@ -1414,6 +1453,8 @@ class TrackerEngine:
         # 高度夾制警告來自設定、不是量測，所以不該等到跑完一幀才出現：
         # 影像還沒進來（或斷線）時操作員最需要看到「你填的高度不會生效」。
         status.alt_clamp_note = self.alt_clamp_warning()
+        # 高度落差要即時算：這是操作員按下導引**之前**最該看到的一行
+        status.alt_step_note = self.altitude_step_preview()
         # 同理：任務記錄狀態要即時，關導引的瞬間 UI 就該把「記錄中」拿掉，
         # 不能等下一幀影像進來才更新
         status.mission_log = (str(self._mission_path.name)

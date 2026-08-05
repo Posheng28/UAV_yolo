@@ -132,6 +132,8 @@ function renderStatus(st) {
   // 高度被夾制永遠優先顯示：設定頁寫 4m、實際飛 20m，這種落差不能只在存檔時講一次
   const altWarn = (st.alt_clamp_note
     ? `<div class="gate-item warn">⚠ ${st.alt_clamp_note}</div>` : "")
+    // 按下導引會立刻爬/降多少——排在最前面，因為這是「按下去之前」該看的
+    + (st.alt_step_note ? `<div class="gate-item warn">${st.alt_step_note}</div>` : "")
     // 高度基準漂移：飛控回報的高度在跑，測地座標會跟著錯（實測 GPS 3 分鐘漂 33m）
     + (st.vehicle && st.vehicle.alt_drift
        ? `<div class="gate-item warn">${st.vehicle.alt_drift}</div>` : "");

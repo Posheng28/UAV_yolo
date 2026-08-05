@@ -230,6 +230,51 @@ def test_start_bat_every_goto_and_call_target_exists():
     assert not missing, f"start.bat 跳到不存在的標籤：{sorted(missing)}"
 
 
+def test_start_bat_has_no_duplicate_labels():
+    """重複的標籤 = cmd 跳到第一個，第二個變成死碼，而且通常代表某段被貼錯位置。
+
+    真的發生過：把 :log 的內容誤插進 :launch 中間，於是主流程還沒啟動伺服器
+    就 exit /b 0——雙擊之後偵測完就安靜結束。標籤全都還「存在」，所以只檢查
+    「跳轉目標存在」的測試抓不到。
+    """
+    labels = re.findall(r"^:(\w+)", bat_text(), re.M)
+    dupes = sorted({l for l in labels if labels.count(l) > 1})
+    assert not dupes, f"start.bat 有重複的標籤：{dupes}"
+
+
+def test_start_bat_launch_actually_launches():
+    """:launch 到下一個標籤之間，一定要真的把伺服器開起來。"""
+    text = bat_text()
+    body = text[text.index(":launch"):text.index(":already_running")]
+    assert 'start "UAV_yolo Server"' in body, ":launch 區塊裡沒有啟動伺服器"
+    assert "exit /b 0" not in body.split('start "UAV_yolo Server"')[0], (
+        ":launch 在啟動伺服器之前就結束了——雙擊後會安靜地什麼都不做")
+
+
+def test_start_bat_records_its_decisions(tmp_path):
+    """視窗一關訊息就沒了，而使用者永遠是關掉之後才來問發生什麼事。"""
+    text = bat_text()
+    assert ":log" in text and "launcher.log" in text
+    # %DATE% 在中文 Windows 是「週三 2026/08/05」——寫進 log 就是非 ASCII 位元組，
+    # 貼到任何地方都是亂碼，而這個檔的用途正是「傳給我看」。（rem 註解不算）
+    code = [l for l in text.splitlines() if not l.strip().lower().startswith("rem ")]
+    assert not [l for l in code if "%DATE%" in l], (
+        "log 用了本地化的日期變數，中文 Windows 會寫出亂碼")
+    for expect in ('call :log using "%PY%"', "SETUP FAILED", "no Python 3.10+"):
+        assert expect in text, f"少了關鍵決策記錄：{expect}"
+
+
+def test_start_bat_says_which_environment_it_chose():
+    """「為什麼沒有 .venv 資料夾」是第一個會被問的問題。
+
+    答案幾乎都是「因為你不需要」，但畫面上不講，成功就看起來像失敗。
+    """
+    text = bat_text()
+    assert "no .venv needed" in text, "沒有在畫面上說明為什麼沒有建 .venv"
+    assert "auto-setup build" in text, (
+        "少了版本橫幅——回報問題時無法分辨對方是不是還在用舊的 start.bat")
+
+
 def test_start_bat_refers_to_the_real_bootstrap():
     text = bat_text()
     assert "tools\\bootstrap.py" in text, "start.bat 沒有呼叫自動安裝腳本"

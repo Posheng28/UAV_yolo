@@ -12,6 +12,11 @@ rem Re-invoked by ourselves to run the server in its own window (see :launch).
 if /i "%~1"=="--serve" goto serve
 
 title UAV_yolo Launcher
+rem Version banner. If someone reports a problem and their window does NOT show
+rem this line, they are running an older copy of the file and no amount of
+rem debugging their machine will help - they need to pull.
+echo UAV_yolo launcher (auto-setup build)
+call :log ---- launcher start ----
 
 rem Pick a Python. Two things make this harder than it looks:
 rem  1. A hardcoded path only works on the machine it was written on.
@@ -56,6 +61,7 @@ echo.
 echo Press Ctrl+C to cancel. Starting in 5 seconds ...
 call :sleep 5
 echo.
+call :log no interpreter had the packages; bootstrapping with "%PY_ANY%"
 "%PY_ANY%" "%~dp0tools\bootstrap.py"
 if %ERRORLEVEL% NEQ 0 goto install_failed
 
@@ -75,6 +81,12 @@ call :port_busy
 if %ERRORLEVEL% EQU 0 goto already_running
 
 echo Using Python: %PY%
+rem Say which environment won, on screen. "Why is there no .venv folder?" is the
+rem first thing people ask, and the answer is usually "because you did not need
+rem one" - but nothing said so, which makes a success look like a failure.
+if exist "%~dp0.venv\Scripts\python.exe" echo Environment: the project's own .venv folder
+if not exist "%~dp0.venv\Scripts\python.exe" echo Environment: no .venv needed - that Python already has every package
+call :log using "%PY%"
 echo Starting UAV_yolo ground station ...
 echo URL: http://localhost:%PORT%
 echo A server window will open. Close it to stop the server.
@@ -87,6 +99,7 @@ start "" "http://localhost:%PORT%"
 exit /b 0
 
 :already_running
+call :log port %PORT% already in use; did not start a second server
 echo.
 echo A ground station is ALREADY running on port %PORT%.
 echo This launcher did NOT start a second one - it could not take the port.
@@ -100,6 +113,7 @@ call :sleep 3
 exit /b 0
 
 :not_listening
+call :log server did not reach LISTENING on port %PORT%
 echo.
 echo [ERROR] The server did not start listening on port %PORT%.
 echo         The reason is in the "UAV_yolo Server" window that just opened
@@ -123,6 +137,7 @@ goto serve_failed
 
 :serve_failed
 echo.
+call :log server exited with %RC%
 echo The server stopped with an error (exit code %RC%).
 rem run.py sends stderr to the log at the OS level (fd 2) before it imports
 rem anything, so this window really has nothing in it - the reason is only in
@@ -147,6 +162,7 @@ exit /b 1
 rem ---- failure messages -----------------------------------------------------
 
 :no_python
+call :log no Python 3.10+ found on this computer
 echo.
 echo [ERROR] No Python 3.10 or newer was found on this computer.
 echo.
@@ -165,6 +181,7 @@ pause
 exit /b 1
 
 :install_failed
+call :log SETUP FAILED
 echo.
 echo [ERROR] Setup did not finish, so the ground station was not started.
 echo         pip log: %~dp0data\pip-install.log
@@ -193,6 +210,18 @@ if %ERRORLEVEL% NEQ 0 exit /b 0
 if not defined PY_ANY set "PY_ANY=%~1"
 "%~1" "%~dp0tools\bootstrap.py" --check >nul 2>&1
 if %ERRORLEVEL% EQU 0 set "PY=%~1"
+exit /b 0
+
+:log
+rem Append one line to data\launcher.log. The launcher window is closed by the
+rem time anyone asks what happened, so the decisions have to survive it - "send
+rem me data\launcher.log" beats "what did it say?" every time.
+rem %DATE% is localized and carries the weekday - "week3 2026/08/05" on this
+rem machine - so writing it produces non-ASCII bytes and the log comes back as
+rem mojibake in whatever tool the student pastes it into. The last 10 characters
+rem are the numeric date, which is ASCII everywhere.
+if not exist "%~dp0data" mkdir "%~dp0data" >nul 2>&1
+>>"%~dp0data\launcher.log" echo [%DATE:~-10% %TIME%] %*
 exit /b 0
 
 :port_busy

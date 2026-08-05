@@ -267,7 +267,33 @@ def check_rangefinder(engine, cfg) -> CheckResult:
     而且「沒送」與「有送但不可用」的處置完全不同，所以要分開講。
     """
     mode = str(cfg.get("camera.height_source", "auto")).strip().lower()
-    d = getattr(engine.link.store, "distance", None)
+    store = engine.link.store
+    d = getattr(store, "distance", None)
+
+    # 🔴 先擋最致命的組合：飛控的高度基準指向一個沒在送資料的感測器。
+    # 實機踩過兩次（2026-07-28、2026-08-04）：EKF2_HGT_REF=2（測距儀）但測距儀
+    # 沒有輸出 → EKF 完全失去有效高度 → 連帶沒有有效位置 → 不能 arm、Hold 也
+    # 不可用。QGC 只說「No valid position estimate」，不會告訴你是哪個參數。
+    hgt_ref = getattr(store, "params", {}).get("EKF2_HGT_REF")
+    if hgt_ref is not None and int(hgt_ref) == 2:
+        why = None
+        if d is None:
+            why = "完全沒有收到 DISTANCE_SENSOR"
+        elif not d.usable():
+            # 實機遇到的正是這種：飛機停在地上，讀數 2cm＝量程下限，
+            # 無法用來初始化高度，EKF 於是連位置都宣告無效（QGC 只說
+            # 「No valid position estimate」，不會指出是哪個參數）。
+            why = (f"測距儀讀數 {d.current_m:.2f}m 在量程 "
+                   f"{d.min_m:.2f}~{d.max_m:.2f}m 的邊緣，無法作為高度基準")
+        if why:
+            return _r("rangefinder", "測距儀高度", "fail",
+                      f"飛控 EKF2_HGT_REF=2（以測距儀為高度基準），但{why}"
+                      "——EKF 會失去有效高度與位置，無法解鎖",
+                      "把 EKF2_HGT_REF 改成 0（氣壓計）：氣壓在本機實測 3 分鐘只漂 2cm，"
+                      "而 GPS 高度漂了 33m，所以也不要用 1(GNSS)。"
+                      "EKF2_RNG_CTRL 保持 1，測距儀仍會在低空輔助；"
+                      "本站的測地也會直接採用它，不受 EKF 設定影響")
+
     if mode == "home":
         return _r("rangefinder", "測距儀高度", "skip",
                   "設定為只用 rel_alt（camera.height_source=home）")

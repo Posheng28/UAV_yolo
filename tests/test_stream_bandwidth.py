@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from uav_yolo.mavlink_io.telemetry import MavlinkConnection
+from uav_yolo.mavlink_io.telemetry import MavlinkConnection, TelemetryStore
 
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
 
@@ -34,6 +34,9 @@ def make_link(stream_rates=None):
     link._target_sys = 1
     link._target_comp = 1
     link.stream_rates = stream_rates or {"ATTITUDE": 10, "GLOBAL_POSITION_INT": 5}
+    # 真實的 MavlinkConnection 一定有 store：_request_intervals 之後會順便去問
+    # WATCHED_PARAMS（EKF2_HGT_REF 等），需要它來記已經拿到的值。
+    link.store = TelemetryStore()
     return link
 
 

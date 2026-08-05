@@ -27,6 +27,29 @@ MSG_ID_HOME_POSITION = 242
 MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS = 285
 MSG_ID_DISTANCE_SENSOR = 132
 
+# 🔴 起飛前值得主動去問的飛控參數。
+# EKF2_HGT_REF 指定 EKF 的高度基準（0=氣壓 1=GNSS 2=測距儀 3=視覺），而它指向
+# 一個「沒有在送資料」的感測器時，飛控會完全失去有效位置估計——QGC 只會顯示
+# 「No valid position estimate」，不會告訴你是哪個參數。這個坑本專案踩過兩次
+# （2026-07-28 與 2026-08-04），兩次都花了很久才找到，所以自檢主動比對。
+WATCHED_PARAMS = ("EKF2_HGT_REF", "EKF2_RNG_CTRL", "EKF2_OF_CTRL")
+
+
+def _decode_param(value: float, param_type: int):
+    """PX4 的整數型參數是把位元原封搬進 float32，要照 param_type 還原。"""
+    import struct
+
+    raw = struct.pack("<f", float(value))
+    if param_type in (5, 6):
+        return struct.unpack("<i", raw)[0]
+    if param_type in (7, 8):
+        return struct.unpack("<I", raw)[0]
+    if param_type in (1, 2):
+        return struct.unpack("<b", raw[:1])[0]
+    if param_type in (3, 4):
+        return struct.unpack("<h", raw[:2])[0]
+    return value
+
 GIMBAL_DEVICE_FLAGS_YAW_LOCK = 16
 
 
@@ -189,6 +212,7 @@ class TelemetryStore:
         self.gps: GpsSample | None = None
         self.landed: LandedSample | None = None
         self.distance: DistanceSample | None = None
+        self.params: dict[str, float] = {}    # 主動問來的飛控參數（見 WATCHED_PARAMS）
         self.last_msg_t: float | None = None
         # 飛控自己講的話（STATUSTEXT）。「為什麼拒絕 arm」只會從這裡出來，
         # 不解析等於把飛控唯一的解釋管道丟掉，操作員只能面對「就是不能 arm」。
@@ -511,6 +535,16 @@ class MavlinkConnection:
                     orientation=int(getattr(msg, "orientation", 25)),
                 ))
 
+            elif mtype == "PARAM_VALUE":
+                pid = msg.param_id
+                if isinstance(pid, (bytes, bytearray)):
+                    pid = pid.decode("utf-8", "replace")
+                pid = pid.strip("\x00")
+                if pid in WATCHED_PARAMS:
+                    # 🔴 PX4 的整數型參數是把位元原封搬進 float32，不照
+                    # param_type 重新解讀的話，整數 2 會印成 2.8e-45。
+                    self.store.params[pid] = _decode_param(msg.param_value, msg.param_type)
+
             elif mtype == "COMMAND_ACK":
                 self.last_ack[msg.command] = (msg.result, now)
 
@@ -662,6 +696,21 @@ class MavlinkConnection:
                 continue
             self._command_long(511, msg_id, 1e6 / hz)  # MAV_CMD_SET_MESSAGE_INTERVAL
         self._command_long(511, MSG_ID_HOME_POSITION, 5e6)  # home 低頻即可
+        self._request_watched_params()
+
+    def _request_watched_params(self) -> None:
+        """問幾個起飛前該核對的參數（見 WATCHED_PARAMS 的說明）。"""
+        if self._conn is None:
+            return
+        for name in WATCHED_PARAMS:
+            if name in self.store.params:
+                continue                      # 拿到就不再問
+            try:
+                with self._send_lock:
+                    self._conn.mav.param_request_read_send(
+                        self._target_sys, self._target_comp, name.encode(), -1)
+            except Exception:
+                return
 
     # ---- 發送 ----
 
